@@ -33,6 +33,7 @@ module card_model
 	reg  [7:0] pad_cmd;
 	integer    pad_len;
 	integer    pad_switches = 0;    // times it was put into analog mode
+	integer    refuse = 0;          // ignores the analog command (a receiver with no controller yet)
 	reg  [7:0] wbuf[0:127];
 	reg  [7:0] wchk;
 	integer    writes = 0;
@@ -102,7 +103,7 @@ module card_model
 			if (idx == 0 && pmode) pad_len = (!pad_cfg && !pad_analog) ? 5 : 9;
 			if (idx == 1 && pmode) pad_cmd = in_sh;
 			if (idx == 3 && pmode && pad_cmd == 8'h43) pad_cfg = in_sh[0];
-			if (idx == 3 && pmode && pad_cmd == 8'h44 && pad_cfg) begin pad_analog = in_sh[0]; pad_switches = pad_switches + 1; end
+			if (idx == 3 && pmode && pad_cmd == 8'h44 && pad_cfg && !refuse) begin pad_analog = in_sh[0]; pad_switches = pad_switches + 1; end
 			if (idx == 1 && !pmode) begin
 				if (in_sh == 8'h52) wmode = 0;
 				else if (in_sh == 8'h57) wmode = 1;
@@ -384,6 +385,14 @@ module tb;
 		check("both in the report", file1[3] == "P" && file1[4] == 4 && file1[5] == 4 && file1[32] == 1 && file1[33] == 1 && file1[34] == 8'h73 && file1[35] == 8'h11 && file1[36] == 8'h40 && file1[37] == 8'h40 && file1[40] == 8'h10
 		      && file1[48] == 2 && file1[49] == 1 && file1[50] == 8'h73 && file1[51] == 8'h08 && file1[52] == 8'h01 && file1[53] == 8'hD0 && file1[56] == 8'hA0 && file1[59] == 1);
 		check("memory cards: port 1 yes, port 2 no", dut.pad_card == 4'b0001 && file1[42] == 1 && file1[58] == 0);
+		// a receiver whose controller pairs late: first refuses analog, later accepts it
+		card2.pad_analog = 0; card2.pad_switches = 0; card2.refuse = 1;
+		repeat (1000000) @(posedge clk);
+		check("still digital: asked again", card2.pad_switches == 0 && dut.sw_cnt >= 3 && dut.pad_id[15:8] == 8'h41);
+		card2.refuse = 0;
+		repeat (400000) @(posedge clk);
+		check("paired later: switched to analog", card2.pad_switches == 1 && dut.pad_id[15:8] == 8'h73);
+		card2.pad_switches = 1;
 		card2.pad_present = 0;
 		repeat (400000) @(posedge clk);
 		check("port 2 unplugged, port 1 still read", !dut.pad_on[1] && dut.pad_btn[31:16] == 0 && file1[49] == 0 && dut.pad_on[0] && file1[33] == 1);

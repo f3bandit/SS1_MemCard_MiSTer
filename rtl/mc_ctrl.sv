@@ -194,6 +194,7 @@ reg        pp;           // the port being read: 0 port 1, 1 port 2
 reg  [5:0] pad_n1, pad_n2;   // reads until the next look for a memory card in that port
 reg  [1:0] cfg1, cfg2;   // switching that port's controller to analog: the next step (0 none)
 reg  [1:0] tried;        // the switch was sent to that port's controller (until it's unplugged)
+reg  [5:0] swc1, swc2;   // reads until the switch is sent again while that pad stays digital
 reg  [7:0] sw_cnt;       // analog switches sent
 wire [1:0] cfg_pp = pp ? cfg2 : cfg1;
 wire [5:0] pn_pp  = pp ? pad_n2 : pad_n1;
@@ -334,6 +335,8 @@ always @(posedge clk) begin
 		tried      <= 0;
 		pad_n1     <= 0;
 		pad_n2     <= 0;
+		swc1       <= 0;
+		swc2       <= 0;
 		cfg1       <= 0;
 		cfg2       <= 0;
 		sw_cnt     <= 0;
@@ -494,7 +497,7 @@ always @(posedge clk) begin
 					phase <= (job == J_VERIFY || job == J_WRITE) ? P_LOAD : (job == J_BACKUP) ? P_READ : (job == J_PAD) ? P_PAD : P_IDLE;
 					tries <= 0;
 					// the controller test starts from scratch
-					pp <= 0; pad_n1 <= 0; pad_n2 <= 0; cfg1 <= 0; cfg2 <= 0; tried <= 0;
+					pp <= 0; pad_n1 <= 0; pad_n2 <= 0; cfg1 <= 0; cfg2 <= 0; tried <= 0; swc1 <= 0; swc2 <= 0;
 					pad_on <= 0; pad_card <= 0; pad_btn <= 0; pad_cnt <= 0;
 				end
 			end
@@ -653,11 +656,16 @@ always @(posedge clk) begin
 								pad_btn[15:0]  <= ~cs_pbtn;
 								pad_ana[31:0]  <= (cs_pid[3:0] >= 3) ? cs_pana : 32'h80808080;
 							end
-							// a digital pad that may be a DualShock: ask for analog mode, once
-							if (cs_pid == 8'h41 && !tried[pp]) begin
-								if (pp) cfg2 <= 1; else cfg1 <= 1;
-								tried[pp] <= 1;
-								sw_cnt    <= sw_cnt + 1'd1;
+							// a digital pad that may be a DualShock: ask for analog mode, and again about
+							// once a second while it stays digital (a wireless receiver answers as a
+							// digital pad before its controller has paired)
+							if (cs_pid == 8'h41) begin
+								if ((pp ? swc2 : swc1) == 0) begin
+									if (pp) begin cfg2 <= 1; swc2 <= 6'd60; end else begin cfg1 <= 1; swc1 <= 6'd60; end
+									tried[pp] <= 1;
+									sw_cnt    <= sw_cnt + 1'd1;
+								end
+								else if (pp) swc2 <= swc2 - 1'd1; else swc1 <= swc1 - 1'd1;
 							end
 							// left in config mode somehow: leave it
 							if (cs_pid == 8'hF3) begin
@@ -666,7 +674,10 @@ always @(posedge clk) begin
 						end
 						else begin
 							if (pp) pad_btn[31:16] <= 0; else pad_btn[15:0] <= 0;
-							if (cs_result == R_NOCARD) tried[pp] <= 0;   // unplugged: switch it again when it's back
+							if (cs_result == R_NOCARD) begin   // unplugged: switch it straight away when it's back
+								tried[pp] <= 0;
+								if (pp) swc2 <= 0; else swc1 <= 0;
+							end
 						end
 					end
 					else begin
