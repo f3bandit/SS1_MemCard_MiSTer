@@ -56,3 +56,20 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "${GITHUB_REF_NAME}" SS1_MemCard_*.rbf --repo "${{ github.repository }}" --title "SS1 Memory Card Tool ${GITHUB_REF_NAME}" --notes "Core build ${GITHUB_REF_NAME}." $(case "$GITHUB_REF_NAME" in *-*) echo --prerelease;; esac)
+
+  # every push to main replaces the "unstable" pre-release with the new build, for testing
+  unstable:
+    if: github.ref == 'refs/heads/main'
+    needs: [simulate, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: SS1_MemCard
+      - name: Replace the unstable pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete unstable --repo "${{ github.repository }}" --cleanup-tag -y || true
+          gh release create unstable SS1_MemCard_*.rbf --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+            --prerelease --title "Unstable test build" --notes "Built from ${{ github.sha }}. For testing only."
