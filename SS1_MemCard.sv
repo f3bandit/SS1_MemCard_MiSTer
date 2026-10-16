@@ -155,10 +155,11 @@ wire  [9:0] cur_sector;
 wire [10:0] n_done, n_ok, n_retried, n_failed, n_differ, n_written;
 wire        from_tool;
 wire  [1:0] step;
-wire        pad_on;
-wire  [7:0] pad_id;
-wire [15:0] pad_btn;
-wire [31:0] pad_ana;
+wire  [1:0] pad_on;    // controller test: port 1 in the low half, port 2 in the high half
+wire [15:0] pad_id;
+wire [31:0] pad_btn;
+wire [63:0] pad_ana;
+wire  [3:0] pad_card;
 wire  [9:0] map_vaddr;
 wire  [2:0] map_vdata;
 
@@ -206,6 +207,7 @@ mc_ctrl mc_ctrl
 	.pad_id(pad_id),
 	.pad_btn(pad_btn),
 	.pad_ana(pad_ana),
+	.pad_card(pad_card),
 	.map_vaddr(map_vaddr),
 	.map_vdata(map_vdata),
 
@@ -240,6 +242,7 @@ screen screen
 	.pad_id(pad_id),
 	.pad_btn(pad_btn),
 	.pad_ana(pad_ana),
+	.pad_card(pad_card),
 	.cur_sector(cur_sector),
 	.n_done(n_done),
 	.n_ok(n_ok),

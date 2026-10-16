@@ -70,3 +70,8 @@ function [4:0] btn_bit(input r, input [5:0] col);
 		endcase
 	end
 endfunction
+// sticks row: where each value's first digit goes (columns counted from the message start)
+localparam SX_LX = 16;
+localparam SX_LY = 23;
+localparam SX_RX = 38;
+localparam SX_RY = 45;
