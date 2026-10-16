@@ -49,7 +49,7 @@ module card_sector
 	input             sio_ack
 );
 
-localparam MODE_STORE = 0, MODE_COMPARE = 1, MODE_PROBE = 2;
+localparam MODE_STORE = 0, MODE_COMPARE = 1, MODE_PROBE = 2, MODE_WRITE = 3;
 localparam R_OK = 0, R_NOCARD = 1, R_BAD = 2, R_RANGE = 3;
 
 reg        b_start, b_last;
@@ -65,9 +65,9 @@ sio_byte sio_byte
 	.sio_clk(sio_clk), .sio_cmd(sio_cmd), .sio_dat(sio_dat), .sio_ack(sio_ack)
 );
 
-localparam S_IDLE = 0, S_SEL = 1, S_BYTE = 2, S_WAIT = 3, S_END = 4;
+localparam S_IDLE = 0, S_SEL = 1, S_BYTE = 2, S_WAIT = 3, S_END = 4, S_PRE = 5, S_PRE2 = 6, S_SEND = 7;
 
-reg  [2:0] state;
+reg  [2:0] state;  // 8 states
 reg  [7:0] idx;      // byte of the command, 0..139
 reg [15:0] cnt;
 reg  [7:0] chk;
@@ -77,7 +77,10 @@ reg  [9:0] sec;
 
 wire [7:0] msb = {6'd0, sec[9:8]};
 wire [7:0] lsb = sec[7:0];
-wire [7:0] didx = idx - 8'd10;
+wire [7:0] didx = idx - 8'd10;   // read: data comes back during bytes 10..137
+wire [7:0] widx = idx - 8'd6;    // write: data goes out in bytes 6..133
+wire       wr   = (md == MODE_WRITE);
+wire [7:0] last_idx = wr ? 8'd137 : 8'd139;
 
 always @(posedge clk) begin
 	b_start <= 0;
@@ -105,24 +108,52 @@ always @(posedge clk) begin
 
 		S_SEL: if (cnt) cnt <= cnt - 1'd1; else state <= S_BYTE;
 
+		// the card buffer is read a couple of clocks ahead of the byte that needs it
 		S_BYTE: begin
-			case (idx)
+			mem_addr <= wr ? {sec, widx[6:0]} : {sec, didx[6:0]};
+			state    <= S_PRE;
+		end
+		S_PRE:  state <= S_PRE2;
+		S_PRE2: state <= S_SEND;
+
+		S_SEND: begin
+			if (wr) begin
+				// write: 81 57 00 00 MSB LSB [data x128] CHK 00 00 00
+				//  reply -- FL 5A 5D 00  MSB  ...          ... 5C 5D 47
+				case (idx)
+					0:   b_tx <= 8'h81;
+					1:   b_tx <= 8'h57;   // 'W'
+					4:   b_tx <= msb;
+					5:   b_tx <= lsb;
+					134: b_tx <= chk;
+					default: b_tx <= (idx >= 6 && idx < 134) ? mem_rdata : 8'h00;
+				endcase
+				if (idx == 4 || idx == 5 || (idx >= 6 && idx < 134)) chk <= chk ^ ((idx == 4) ? msb : (idx == 5) ? lsb : mem_rdata);
+			end
+			else case (idx)
 				0:       b_tx <= 8'h81;
 				1:       b_tx <= 8'h52;   // 'R'
 				4:       b_tx <= msb;
 				5:       b_tx <= lsb;
 				default: b_tx <= 8'h00;
 			endcase
-			b_last  <= (idx == 139);
+			b_last  <= (idx == last_idx);
 			b_start <= 1;
-			// data byte idx 10..137 lives at sector*128 + idx-10
-			mem_addr <= {sec, didx[6:0]};
 			state   <= S_WAIT;
 		end
 
 		S_WAIT: if (b_done) begin
 			// check the reply
-			case (idx)
+			if (wr) case (idx)
+				0:   if (!b_ack) res <= R_NOCARD;
+				2:   if (b_rx != 8'h5A) res <= R_BAD;
+				3:   if (b_rx != 8'h5D) res <= R_BAD;
+				135: if (b_rx != 8'h5C) res <= R_BAD;
+				136: if (b_rx != 8'h5D) res <= R_BAD;
+				137: if (b_rx != 8'h47) res <= (b_rx == 8'hFF) ? R_RANGE : R_BAD;   // 4E: checksum refused
+				default: ;
+			endcase
+			else case (idx)
 				0:   if (!b_ack) res <= R_NOCARD;
 				2:   if (b_rx != 8'h5A) res <= R_BAD;
 				3:   if (b_rx != 8'h5D) res <= R_BAD;
@@ -135,8 +166,8 @@ always @(posedge clk) begin
 				default: ;
 			endcase
 
-			if (idx == 8 || idx == 9) chk <= chk ^ b_rx;
-			if (idx >= 10 && idx < 138) begin
+			if (!wr && (idx == 8 || idx == 9)) chk <= chk ^ b_rx;
+			if (!wr && idx >= 10 && idx < 138) begin
 				chk <= chk ^ b_rx;
 				if (idx == 10) hdr0 <= b_rx;
 				if (idx == 11) hdr1 <= b_rx;
@@ -148,13 +179,13 @@ always @(posedge clk) begin
 			end
 
 			// stop early on a missing ACK or a broken reply; the caller retries
-			if (idx == 139 || (idx != 139 && !b_ack) || (idx == 0 && !b_ack)) state <= S_END;
-			else if ((idx == 2 && b_rx != 8'h5A) || (idx == 9 && b_rx == 8'hFF && res == R_RANGE)) state <= S_END;
+			if (idx == last_idx || !b_ack) state <= S_END;
+			else if ((idx == 2 && b_rx != 8'h5A) || (!wr && idx == 9 && b_rx == 8'hFF && res == R_RANGE)) state <= S_END;
 			else begin
 				idx   <= idx + 1'd1;
 				state <= S_BYTE;
 			end
-			if (idx != 139 && !b_ack && idx != 0) res <= R_BAD;
+			if (idx != last_idx && !b_ack && idx != 0) res <= R_BAD;
 		end
 
 		S_END: begin

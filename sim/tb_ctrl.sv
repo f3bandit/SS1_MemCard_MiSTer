@@ -23,10 +23,16 @@ module card_model
 	reg  [9:0] addr;
 	reg  [7:0] chk;
 	reg        active;
+	reg        wmode;
+	reg  [7:0] wbuf[0:127];
+	reg  [7:0] wchk;
+	integer    writes = 0;
+	integer    bad_write_sector = -1;   // refuses the first write
+	integer    bad_write_count = 0;
 
-	initial begin dat = 1; ack_n = 1; active = 0; end
+	initial begin dat = 1; ack_n = 1; active = 0; wmode = 0; end
 
-	always @(negedge sel_n) begin idx = 0; bitn = 0; active = present; out_sh = 8'hFF; end
+	always @(negedge sel_n) begin idx = 0; bitn = 0; active = present; out_sh = 8'hFF; wmode = 0; end
 	always @(posedge sel_n) begin active = 0; dat = 1; end
 
 	// card drives DAT while CLK is low, the console samples on the rising edge
@@ -44,7 +50,13 @@ module card_model
 	function [7:0] reply(input integer i);
 		integer d;
 		begin
-			case (i)
+			if (wmode && i >= 3) begin
+				if (i == 134) reply = 8'h5C;
+				else if (i == 135) reply = 8'h5D;
+				else if (i == 136) reply = (wchk == 0) ? 8'h47 : 8'h4E;
+				else reply = 8'h00;
+			end
+			else case (i)
 				0: reply = 8'h08;       // FLAG, answered during byte 1
 				1: reply = 8'h5A;
 				2: reply = 8'h5D;
@@ -68,9 +80,21 @@ module card_model
 		begin
 			// in_sh is the byte just received (index idx); out byte for idx+1 is prepared now
 			if (idx == 0 && in_sh != 8'h81) begin active = 0; disable respond; end
-			if (idx == 1 && in_sh != 8'h52) begin active = 0; disable respond; end
-			if (idx == 4) addr[9:8] = in_sh[1:0];
-			if (idx == 5) begin
+			if (idx == 1) begin
+				if (in_sh == 8'h52) wmode = 0;
+				else if (in_sh == 8'h57) wmode = 1;
+				else begin active = 0; disable respond; end
+			end
+			if (wmode && idx == 4) addr[9:8] = in_sh[1:0];
+			if (wmode && idx == 5) begin addr[7:0] = in_sh; wchk = addr[9:8] ^ addr[7:0]; end
+			if (wmode && idx >= 6 && idx < 134) begin wbuf[idx-6] = in_sh; wchk = wchk ^ in_sh; end
+			if (wmode && idx == 134) begin
+				wchk = wchk ^ in_sh;   // 0 when the checksum was right
+				if (addr == bad_write_sector && bad_write_count > 0) begin bad_write_count = bad_write_count - 1; end
+				else if (wchk == 0) begin for (i = 0; i < 128; i = i + 1) mem[{addr, 7'd0} + i] = wbuf[i]; writes = writes + 1; end
+			end
+			if (!wmode && idx == 4) addr[9:8] = in_sh[1:0];
+			if (!wmode && idx == 5) begin
 				addr[7:0] = in_sh;
 				chk = addr[9:8] ^ addr[7:0];
 				for (i = 0; i < 128; i = i + 1) chk = chk ^ mem[{addr, 7'd0} + i];
@@ -79,7 +103,7 @@ module card_model
 			end
 			out_sh = reply(idx);
 			idx = idx + 1;
-			if (idx < 140) begin
+			if (idx < (wmode ? 138 : 140)) begin
 				#(ack_delay) ack_n = 0;
 				#200 ack_n = 1;
 			end
@@ -113,7 +137,7 @@ module tb;
 
 	wire sel_n, sclk, scmd, dat, ack_n;
 
-	mc_ctrl #(.HALF_FAST(3), .HALF_SLOW(6), .ACK_TO(60), .SEL_DLY(4), .GAP(10), .RETRY_WAIT(20), .POLL(2000)) dut
+	mc_ctrl #(.HALF_FAST(3), .HALF_SLOW(6), .ACK_TO(60), .SEL_DLY(4), .GAP(10), .RETRY_WAIT(20), .POLL(2000), .PROGRESS(50000)) dut
 	(
 		.clk(clk), .reset(reset),
 		.cmd_backup(cmd_backup), .cmd_verify(cmd_verify),
@@ -124,7 +148,7 @@ module tb;
 		.sd_buff_din0(sd_buff_din0), .sd_buff_din1(sd_buff_din1),
 		.phase(phase), .job(job), .result(result), .card_state(card_state), .file_state(file_state),
 		.cur_sector(cur_sector), .n_done(n_done), .n_ok(n_ok), .n_retried(n_retried),
-		.n_failed(n_failed), .n_differ(n_differ), .req_from_tool(),
+		.n_failed(n_failed), .n_differ(n_differ), .n_written(), .req_from_tool(),
 		.map_vaddr(10'd0), .map_vdata(),
 		.sio_sel_n(sel_n), .sio_clk(sclk), .sio_cmd(scmd), .sio_dat(dat), .sio_ack(ack_n)
 	);
@@ -188,6 +212,7 @@ module tb;
 	endtask
 
 	integer i, errs, fails;
+	integer k;
 	task check(input [8*40-1:0] name, input integer cond);
 		begin
 			if (cond) $display("PASS %0s", name);
@@ -215,6 +240,9 @@ module tb;
 		mount(1, 1536);
 		repeat (20000) @(posedge clk);
 		mount(0, 131072);
+		wait (n_done > 600);
+		repeat (60000) @(posedge clk);
+		check("progress in the job file", file1[3] == "P" && file1[25] == 3 && (file1[22] + file1[23]*256) > 500 && file1[512] == 1);
 		wait_done();
 		errs = 0;
 		for (i = 0; i < 131072; i = i + 1) if (file0[i] !== card.mem[i]) errs = errs + 1;
@@ -258,6 +286,23 @@ module tb;
 		card.present = 1;
 		wait_done();
 		check("job starts when the card goes in", result == 1 || result == 2);
+
+		// 7. SS1 Tool writes a changed image back: only the changed sectors are written,
+		//    one write is refused once and retried
+		for (i = 0; i < 131072; i = i + 1) file0[i] = card.mem[i];
+		for (i = 0; i < 128; i = i + 1) begin file0[128*10 + i] = i; file0[128*700 + i] = ~i; file0[128*1023 + i] = 8'h5A; end
+		card.writes = 0; card.bad_write_sector = 700; card.bad_write_count = 1;
+		file1[0] = "S"; file1[1] = "M"; file1[2] = "C"; file1[3] = "Q"; file1[4] = 3;
+		mount(1, 1536);
+		repeat (20000) @(posedge clk);
+		mount(0, 131072);
+		wait_done();
+		errs = 0;
+		for (i = 0; i < 131072; i = i + 1) if (file0[i] !== card.mem[i]) errs = errs + 1;
+		check("write: card now matches the file", errs == 0);
+		check("write: only 3 sectors written", card.writes == 3 && dut.n_written == 3 && n_ok == 1021 && n_failed == 0);
+		check("write: result and report", result == 9 && file1[3] == "R" && file1[5] == 3 && file1[6] == 9 && file1[28] == 3 && file1[512 + 700] == 5);
+		check("write: card file left alone", file0[128*10 + 5] == 5);
 
 		// 6. wrong file size
 		mount(0, 1000);

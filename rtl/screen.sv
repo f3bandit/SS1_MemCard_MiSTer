@@ -25,6 +25,7 @@ module screen
 	input      [10:0] n_retried,
 	input      [10:0] n_failed,
 	input      [10:0] n_differ,
+	input      [10:0] n_written,
 	output reg  [9:0] map_addr,
 	input       [2:0] map_data,     // one clock after map_addr
 
@@ -111,11 +112,11 @@ always @(*) begin
 		5:  if (ncol < 9) msg = M_FILE; else begin mcol = 9;
 				msg = (file_state == 1) ? M_F_OK : (file_state == 2) ? M_F_BAD : M_F_NONE; end
 		6:  if (ncol < 9) msg = M_JOB; else begin mcol = 9;
-				msg = (job == 1) ? M_J_BACKUP : (job == 2) ? M_J_VERIFY : M_J_NONE; end
+				msg = (job == 1) ? M_J_BACKUP : (job == 2) ? M_J_VERIFY : (job == 3) ? M_J_WRITE : M_J_NONE; end
 		7:  if (from_tool && job != 0) begin mcol = 9; msg = M_J_TOOL; end
 		9:  case (phase)
 				P_LOAD:   msg = M_P_LOAD;
-				P_READ:   begin msg = M_P_READ; if (ncol >= 17 && ncol <= 20) begin is_num = 1; num = sector_no; npos = ncol - 6'd17; end end
+				P_READ:   begin msg = (job == 3) ? M_P_WRITE : M_P_READ; if (ncol >= 17 && ncol <= 20) begin is_num = 1; num = sector_no; npos = ncol - 6'd17; end end
 				P_SAVE:   msg = M_P_SAVE;
 				P_REPORT: msg = M_P_REPORT;
 				default:  msg = result ? M_P_DONE : M_P_IDLE;
@@ -124,21 +125,24 @@ always @(*) begin
 		13: begin mcol = 38; msg = M_L_RETRY; end
 		14: begin mcol = 38; msg = M_L_FAIL;  end
 		15: begin mcol = 38; msg = M_L_DIFF;  end
-		16: begin mcol = 38; msg = M_L_NONE;  end
-		19, 20, 21, 22: begin
+		16: begin mcol = 38; msg = M_L_WRITTEN; end
+		17: begin mcol = 38; msg = M_L_NONE;  end
+		19, 20, 21, 22, 23: begin
 				mcol = 36;
 				case (nrow)
 					19: begin msg = M_N_OK;    num = n_ok;      end
 					20: begin msg = M_N_RETRY; num = n_retried; end
 					21: begin msg = M_N_FAIL;  num = n_failed;  end
-					default: begin msg = M_N_DIFF; num = n_differ; end
+					22: begin msg = M_N_DIFF; num = n_differ; end
+					default: begin msg = M_N_WRITTEN; num = n_written; end
 				endcase
 				if (ncol >= 47 && ncol <= 50) begin is_num = 1; npos = ncol - 6'd47; end
 			end
 		28: case (result)
 				1:  msg = (job == 2) ? M_R_V_OK : M_R_OK;
 				2:  msg = (job == 2) ? M_R_V_OK : M_R_OK_RETRY;
-				3:  msg = (job == 2) ? M_V_FAILED : M_R_FAILED;
+				3:  msg = (job == 2) ? M_V_FAILED : (job == 3) ? M_W_FAILED : M_R_FAILED;
+				9:  msg = M_W_OK;
 				4:  msg = M_R_NOCARD;
 				5:  msg = M_R_DIFFER;
 				6:  msg = M_R_BADFILE;
@@ -187,7 +191,7 @@ wire in_bar   = (vc >= 82) && (vc < 86) && (hc >= 16) && (hc < 16 + 256);
 wire bar_fill = (hc - 10'd16) < n_done[10:2];
 
 // legend squares at column 36, rows 12-16
-wire in_leg = (x[9:3] == 36) && (row >= 12) && (row <= 16) && (vc[2:0] >= 1) && (vc[2:0] <= 6) && (x[2:0] >= 1) && (x[2:0] <= 6);
+wire in_leg = (x[9:3] == 36) && (row >= 12) && (row <= 17) && (vc[2:0] >= 1) && (vc[2:0] <= 6) && (x[2:0] >= 1) && (x[2:0] <= 6);
 
 function [23:0] map_col(input [2:0] v);
 	case (v)
@@ -195,6 +199,7 @@ function [23:0] map_col(input [2:0] v);
 		2: map_col = 24'hE8C030;   // needed a retry
 		3: map_col = 24'hE84040;   // failed
 		4: map_col = 24'hD070E8;   // differs from the file
+		5: map_col = 24'h4A9CF0;   // written and checked
 		default: map_col = 24'h343A50;
 	endcase
 endfunction
@@ -206,12 +211,12 @@ always @(*) begin
 		if (cell_in) c = (busy && phase == P_READ && cellno == cur_sector) ? 24'hFFFFFF : map_col(map_data);
 	end
 	else if (in_bar) c = bar_fill ? 24'h38C058 : 24'h343A50;
-	else if (in_leg) c = map_col(row == 12 ? 3'd1 : row == 13 ? 3'd2 : row == 14 ? 3'd3 : row == 15 ? 3'd4 : 3'd0);
+	else if (in_leg) c = map_col(row == 12 ? 3'd1 : row == 13 ? 3'd2 : row == 14 ? 3'd3 : row == 15 ? 3'd4 : row == 16 ? 3'd5 : 3'd0);
 	else if (pix) begin
 		case (row)
 			1:  c = 24'h60D0FF;
 			28: case (result)
-					1, 2:    c = (result == 2 && job != 2) ? 24'hE8C030 : 24'h48E070;
+					1, 2, 9: c = (result == 2 && job != 2) ? 24'hE8C030 : 24'h48E070;
 					8:       c = 24'hE8C030;
 					default: c = 24'hFF5050;
 				endcase
