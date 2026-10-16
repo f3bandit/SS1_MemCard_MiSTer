@@ -4,7 +4,8 @@
 //  Copyright (C) 2026 f3bandit
 //
 //  Backs up a PlayStation memory card in the SuperStation One's front port 1 (SNAC) to a
-//  file, and checks a card against a file. It only reads the card.
+//  file, checks a card against a file, and (asked by SS1 Tool) writes a file back to the card:
+//  only the sectors that differ, each one read back to check it.
 //
 //  This program is free software: you can redistribute it and/or modify it under the terms
 //  of the GNU General Public License as published by the Free Software Foundation, either
@@ -52,7 +53,7 @@ assign VIDEO_ARY = 12'd3;
 localparam CONF_STR = {
 	"SS1_MemCard;;",
 	"S0,MCDMCRSAV,Card file;",
-	"H0S1,BIN,Job file;",
+	"S1,BIN,Job file (SS1 Tool);",
 	"-;",
 	"R[1],Back up card to file;",
 	"R[2],Check card against file;",
@@ -89,7 +90,7 @@ hps_io #(.CONF_STR(CONF_STR), .VDNUM(2)) hps_io
 
 	.buttons(buttons),
 	.status(status),
-	.status_menumask(16'h0001),   // keeps the job file (SS1 Tool's) out of the menu
+	.status_menumask(16'h0000),
 
 	.img_mounted(img_mounted),
 	.img_readonly(img_readonly),
@@ -148,7 +149,7 @@ wire  [2:0] phase;
 wire  [1:0] job, card_state, file_state;
 wire  [3:0] result;
 wire  [9:0] cur_sector;
-wire [10:0] n_done, n_ok, n_retried, n_failed, n_differ;
+wire [10:0] n_done, n_ok, n_retried, n_failed, n_differ, n_written;
 wire        from_tool;
 wire  [9:0] map_vaddr;
 wire  [2:0] map_vdata;
@@ -189,6 +190,7 @@ mc_ctrl mc_ctrl
 	.n_retried(n_retried),
 	.n_failed(n_failed),
 	.n_differ(n_differ),
+	.n_written(n_written),
 	.req_from_tool(from_tool),
 	.map_vaddr(map_vaddr),
 	.map_vdata(map_vdata),
@@ -224,6 +226,7 @@ screen screen
 	.n_retried(n_retried),
 	.n_failed(n_failed),
 	.n_differ(n_differ),
+	.n_written(n_written),
 	.map_addr(map_vaddr),
 	.map_data(map_vdata),
 	.ce_pix(ce_pix),

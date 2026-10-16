@@ -11,7 +11,7 @@
 //   drive 0  the card file (raw 128 KB .mcd/.mcr/.sav image): written by a backup, read by a verify
 //   drive 1  the job file (optional, written by SS1 Tool): a request in, a report out
 //
-// Job file request (block 0): "SMCQ", job (1 backup, 2 verify), 3 bytes 0, 4-byte id.
+// Job file request (block 0): "SMCQ", job (1 backup, 2 verify, 3 write), 3 bytes 0, 4-byte id.
 // Job file report:            block 0  "SMCR", version, job, result, card state,
 //                                      id (4), ok, retried, failed, differ, retries (16-bit LE),
 //                                      sectors done (16-bit LE), speed
@@ -19,7 +19,11 @@
 //
 // Backup: the whole card is read into the card buffer (retrying sectors that come back
 // broken), then written to drive 0 in one go. Nothing is written when a sector couldn't be
-// read, unless "save anyway" is on. The card itself is only ever read.
+// read, unless "save anyway" is on.
+//
+// Write (job 3, only from SS1 Tool's job file): the file goes into the card buffer, then every
+// sector of the card is compared with it; a sector that differs is written and read back until
+// it matches (or it's marked failed). Sectors that already match are never written.
 
 module mc_ctrl
 #(
@@ -30,7 +34,9 @@ module mc_ctrl
 	parameter SEL_DLY    = 400,      // 20 us
 	parameter GAP        = 2000,     // 100 us between commands
 	parameter RETRY_WAIT = 20000,    // 1 ms before a retry (10 ms on the slow bus)
-	parameter POLL       = 6000000   // look for a card every 0.3 s
+	parameter POLL       = 6000000,  // look for a card every 0.3 s
+	parameter PROGRESS   = 5000000,  // progress into the job file every 0.25 s
+	parameter WRITE_GAP  = 100000    // 5 ms after writing a sector before reading it back
 )
 (
 	input             clk,
@@ -70,6 +76,7 @@ module mc_ctrl
 	output reg [10:0] n_retried,
 	output reg [10:0] n_failed,
 	output reg [10:0] n_differ,
+	output reg [10:0] n_written,
 	output reg        req_from_tool,
 	input       [9:0] map_vaddr,
 	output reg  [2:0] map_vdata,
@@ -85,16 +92,16 @@ module mc_ctrl
 // phases
 localparam P_IDLE = 0, P_CLEAR = 1, P_LOAD = 2, P_READ = 3, P_SAVE = 4, P_REPORT = 5, P_DONE = 6;
 // jobs
-localparam J_NONE = 0, J_BACKUP = 1, J_VERIFY = 2;
+localparam J_NONE = 0, J_BACKUP = 1, J_VERIFY = 2, J_WRITE = 3;
 // results
 localparam RS_NONE = 0, RS_OK = 1, RS_OK_RETRY = 2, RS_FAILED = 3, RS_NOCARD = 4, RS_DIFFER = 5,
-           RS_BADFILE = 6, RS_READONLY = 7, RS_SAVED_BAD = 8;
+           RS_BADFILE = 6, RS_READONLY = 7, RS_SAVED_BAD = 8, RS_WRITTEN = 9;
 // card state
 localparam C_NONE = 0, C_FORMATTED = 1, C_BLANK = 2;
 // file state
 localparam F_NONE = 0, F_OK = 1, F_BAD = 2;
 // sector map
-localparam MAP_NONE = 0, MAP_OK = 1, MAP_RETRY = 2, MAP_FAIL = 3, MAP_DIFFER = 4;
+localparam MAP_NONE = 0, MAP_OK = 1, MAP_RETRY = 2, MAP_FAIL = 3, MAP_DIFFER = 4, MAP_WRITTEN = 5;
 
 localparam MAX_TRIES = 6;
 localparam VERSION   = 1;
@@ -118,7 +125,7 @@ reg [9:0] map_addr;
 reg [2:0] map_wdata;
 reg       map_we;
 reg [2:0] map_q;
-wire [9:0] map_ra = (phase == P_REPORT) ? {rep_blk_sel[1], sd_buff_addr} : map_addr;
+wire [9:0] map_ra = (phase == P_REPORT || pr_st != 0) ? {rep_blk_sel[1], sd_buff_addr} : map_addr;
 always @(posedge clk) begin
 	if (map_we) map[map_addr] <= map_wdata;
 	map_q <= map[map_ra];
@@ -150,7 +157,7 @@ card_sector card_sector
 	.sio_sel_n(sio_sel_n), .sio_clk(sio_clk), .sio_cmd(sio_cmd), .sio_dat(sio_dat), .sio_ack(sio_ack)
 );
 
-localparam CS_STORE = 0, CS_COMPARE = 1, CS_PROBE = 2;
+localparam CS_STORE = 0, CS_COMPARE = 1, CS_PROBE = 2, CS_WRITE = 3;
 localparam R_OK = 0, R_NOCARD = 1, R_BAD = 2, R_RANGE = 3;
 
 ////////////////////////////// job file //////////////////////////////
@@ -161,6 +168,10 @@ reg  [1:0] req_job;
 reg        jf_mounted;
 reg        req_rd;       // reading the request from the job file
 reg        cf_new;       // a card file was just mounted
+reg        rep_final;    // the report is final ("SMCR"), not progress ("SMCP")
+reg  [1:0] pr_st;        // progress writer
+reg  [1:0] pr_blk;
+reg [23:0] pr_tmr;
 reg        cf_mounted;
 reg        cf_readonly;
 reg  [8:0] rep_blk_sel;   // which report block hps_io is reading (0..2)
@@ -170,7 +181,7 @@ reg [10:0] n_retries;
 reg  [7:0] rep0;
 always @(*) begin
 	case (sd_buff_addr)
-		0: rep0 = "S";  1: rep0 = "M";  2: rep0 = "C";  3: rep0 = "R";
+		0: rep0 = "S";  1: rep0 = "M";  2: rep0 = "C";  3: rep0 = rep_final ? "R" : "P";
 		4: rep0 = VERSION;
 		5: rep0 = job;
 		6: rep0 = result;
@@ -183,11 +194,47 @@ always @(*) begin
 		20: rep0 = n_retries[7:0]; 21: rep0 = n_retries[10:8];
 		22: rep0 = n_done[7:0];    23: rep0 = n_done[10:8];
 		24: rep0 = opt_slow;
+		28: rep0 = n_written[7:0]; 29: rep0 = n_written[10:8];
+		25: rep0 = phase;
+		26: rep0 = cur_sector[7:0]; 27: rep0 = cur_sector[9:8];
 		default: rep0 = 0;
 	endcase
 end
 assign sd_buff_din1 = rep_blk_sel ? {5'd0, map_q} : rep0;
 assign sd_buff_din0 = m_q;
+
+// one sector is finished: mark it on the map, count it, go to the next one
+task finish_sector(input [2:0] code);
+	begin
+		map_addr  <= cur_sector;
+		map_wdata <= code;
+		map_we    <= 1;
+		n_done    <= n_done_next;
+		case (code)
+			MAP_OK:      n_ok      <= n_ok + 1'd1;
+			MAP_RETRY:   n_retried <= n_retried + 1'd1;
+			MAP_DIFFER:  n_differ  <= n_differ + 1'd1;
+			MAP_WRITTEN: n_written <= n_written + 1'd1;
+			default:     n_failed  <= n_failed + 1'd1;
+		endcase
+		nocard_run <= (cs_result == R_NOCARD) ? nocard_run + 1'd1 : 3'd0;
+		if (cs_result == R_NOCARD && (n_done == 0 || nocard_run == 3)) begin
+			// no card after all, or it was pulled out
+			result     <= RS_NOCARD;
+			card_state <= C_NONE;
+			phase      <= P_REPORT;
+			blk        <= 0;
+		end
+		else if (cur_sector == 1023) begin
+			phase <= P_SAVE;
+			blk   <= 0;
+		end
+		else begin
+			cur_sector <= cur_sector + 1'd1;
+			tries      <= 0;
+		end
+	end
+endtask
 
 ////////////////////////////// main state machine //////////////////////////////
 
@@ -195,6 +242,7 @@ reg  [2:0] sd_st;        // file transfer sub-state
 reg  [8:0] blk;          // block counter
 reg [23:0] tmr;
 reg  [2:0] tries;
+reg  [2:0] wtries;
 reg        any_retry;
 reg  [1:0] pend_job;     // job waiting for a card or a file
 reg  [1:0] old_ack;
@@ -208,7 +256,6 @@ always @(posedge clk) begin
 	old_ack  <= sd_ack;
 
 	if (reset) begin
-		phase      <= P_IDLE;
 		job        <= J_NONE;
 		pend_job   <= J_NONE;
 		result     <= RS_NONE;
@@ -220,7 +267,21 @@ always @(posedge clk) begin
 		req_valid  <= 0;
 		jf_mounted <= 0;
 		req_rd     <= 0;
+		// a reset starts the screen afresh: counts and the sector map are cleared
+		n_done     <= 0;
+		n_ok       <= 0;
+		n_retried  <= 0;
+		n_failed   <= 0;
+		n_differ   <= 0;
+		n_written  <= 0;
+		n_retries  <= 0;
+		cur_sector <= 0;
+		map_addr   <= 0;
+		phase      <= P_CLEAR;
 		cf_new     <= 0;
+		rep_final  <= 1;
+		pr_st      <= 0;
+		pr_tmr     <= 0;
 		cf_mounted <= 0;
 		tmr        <= 0;
 		req_from_tool <= 0;
@@ -252,7 +313,7 @@ always @(posedge clk) begin
 		if (sd_ack[1]) sd_rd[1] <= 0;
 		if (old_ack[1] && !sd_ack[1] && req_rd) begin
 			req_rd <= 0;
-			if (req[0] == "S" && req[1] == "M" && req[2] == "C" && req[3] == "Q" && (req[4] == J_BACKUP || req[4] == J_VERIFY)) begin
+			if (req[0] == "S" && req[1] == "M" && req[2] == "C" && req[3] == "Q" && (req[4] == J_BACKUP || req[4] == J_VERIFY || req[4] == J_WRITE)) begin
 				req_valid <= 1;
 				req_job   <= req[4][1:0];
 			end
@@ -276,6 +337,22 @@ always @(posedge clk) begin
 		if (cmd_verify && phase == P_IDLE) begin pend_job <= J_VERIFY; req_from_tool <= 0; end
 
 		if (tmr) tmr <= tmr - 1'd1;
+		if (pr_tmr) pr_tmr <= pr_tmr - 1'd1;
+
+		// progress for SS1 Tool: while a job runs, the job file gets the counts and the
+		// sector map (as "SMCP") every quarter second; the final report says "SMCR"
+		case (pr_st)
+			0: if (jf_mounted && !pr_tmr && (phase == P_LOAD || phase == P_READ || phase == P_SAVE)) begin
+				pr_blk <= 0;
+				pr_st  <= 1;
+			end
+			1: begin rep_blk_sel <= pr_blk; sd_lba1 <= pr_blk; sd_wr[1] <= 1; pr_st <= 2; end
+			2: if (sd_ack[1]) begin sd_wr[1] <= 0; pr_st <= 3; end
+			3: if (!sd_ack[1]) begin
+				if (pr_blk == 2) begin pr_st <= 0; pr_tmr <= 24'(PROGRESS); end
+				else begin pr_blk <= pr_blk + 1'd1; pr_st <= 1; end
+			end
+		endcase
 
 		case (phase)
 			// look at the card every 0.3 s; start a job once there is a card and a file
@@ -302,8 +379,11 @@ always @(posedge clk) begin
 						n_retried <= 0;
 						n_failed  <= 0;
 						n_differ  <= 0;
+						n_written <= 0;
 						n_retries <= 0;
 						nocard_run <= 0;
+						rep_final <= 0;
+						pr_tmr    <= 24'(PROGRESS / 4);
 						any_retry <= 0;
 						cur_sector <= 0;
 						map_addr  <= 0;
@@ -334,7 +414,7 @@ always @(posedge clk) begin
 				if (map_addr == 1023) begin
 					blk   <= 0;
 					sd_st <= 0;
-					phase <= (job == J_VERIFY) ? P_LOAD : P_READ;
+					phase <= (job == J_VERIFY || job == J_WRITE) ? P_LOAD : (job == J_BACKUP) ? P_READ : P_IDLE;
 					tries <= 0;
 				end
 			end
@@ -349,56 +429,27 @@ always @(posedge clk) begin
 				end
 			endcase
 
+			// read every sector (backup, check), or bring the card in line with the file (write)
 			P_READ: case (sd_st)
 				0: if (!tmr) begin
 					cs_sector <= cur_sector;
-					cs_mode   <= (job == J_VERIFY) ? CS_COMPARE : CS_STORE;
+					cs_mode   <= (job == J_BACKUP) ? CS_STORE : CS_COMPARE;
 					cs_start  <= 1;
 					sd_st     <= 1;
 				end
 				1: if (cs_done) begin
 					tmr   <= 24'(GAP);
 					sd_st <= 0;
-					if (cs_result == R_OK || tries == MAX_TRIES - 1 || cs_result == R_RANGE) begin
-						// this sector is finished
-						map_addr <= cur_sector;
-						map_we   <= 1;
-						n_done   <= n_done_next;
-						if (cs_result == R_OK) begin
-							if (job == J_VERIFY && cs_mismatch) begin
-								map_wdata <= MAP_DIFFER;
-								n_differ  <= n_differ + 1'd1;
-							end
-							else if (tries) begin
-								map_wdata <= MAP_RETRY;
-								n_retried <= n_retried + 1'd1;
-							end
-							else begin
-								map_wdata <= MAP_OK;
-								n_ok      <= n_ok + 1'd1;
-							end
-						end
-						else begin
-							map_wdata <= MAP_FAIL;
-							n_failed  <= n_failed + 1'd1;
-						end
-
-						nocard_run <= (cs_result == R_NOCARD) ? nocard_run + 1'd1 : 3'd0;
-						if (cs_result == R_NOCARD && (n_done == 0 || nocard_run == 3)) begin
-							// no card after all
-							result     <= RS_NOCARD;
-							card_state <= C_NONE;
-							phase      <= P_REPORT;
-							blk        <= 0;
-						end
-						else if (cur_sector == 1023) begin
-							phase <= P_SAVE;
-							blk   <= 0;
-						end
-						else begin
-							cur_sector <= cur_sector + 1'd1;
-							tries      <= 0;
-						end
+					if (cs_result == R_OK && job == J_WRITE && cs_mismatch) begin
+						// this sector differs from the file: write it
+						wtries <= 0;
+						sd_st  <= 2;
+					end
+					else if (cs_result == R_OK || tries == MAX_TRIES - 1 || cs_result == R_RANGE) begin
+						if (cs_result != R_OK) finish_sector(MAP_FAIL);
+						else if (job == J_VERIFY && cs_mismatch) finish_sector(MAP_DIFFER);
+						else if (tries) finish_sector(MAP_RETRY);
+						else finish_sector(MAP_OK);
 					end
 					else begin
 						tries     <= tries + 1'd1;
@@ -406,12 +457,47 @@ always @(posedge clk) begin
 						tmr       <= opt_slow ? 24'(RETRY_WAIT * 10) : 24'(RETRY_WAIT);
 					end
 				end
+				2: if (!tmr) begin
+					cs_sector <= cur_sector;
+					cs_mode   <= CS_WRITE;
+					cs_start  <= 1;
+					sd_st     <= 3;
+				end
+				3: if (cs_done) begin
+					tmr   <= 24'(WRITE_GAP);
+					sd_st <= 4;
+				end
+				// read it back: it must match the file now
+				4: if (!tmr) begin
+					cs_sector <= cur_sector;
+					cs_mode   <= CS_COMPARE;
+					cs_start  <= 1;
+					sd_st     <= 5;
+				end
+				5: if (cs_done) begin
+					tmr <= 24'(GAP);
+					if (cs_result == R_OK && !cs_mismatch) begin
+						sd_st <= 0;
+						finish_sector(MAP_WRITTEN);
+					end
+					else if (wtries == MAX_TRIES - 1) begin
+						sd_st <= 0;
+						finish_sector(MAP_FAIL);
+					end
+					else begin
+						wtries    <= wtries + 1'd1;
+						n_retries <= n_retries + 1'd1;
+						tmr       <= opt_slow ? 24'(RETRY_WAIT * 10) : 24'(RETRY_WAIT);
+						sd_st     <= 2;
+					end
+				end
 			endcase
 
 			// backup: write the card buffer to the card file
 			P_SAVE: begin
 				if (job != J_BACKUP) begin
-					result <= n_differ ? RS_DIFFER : n_failed ? RS_FAILED : n_retried ? RS_OK_RETRY : RS_OK;
+					if (job == J_WRITE) result <= n_failed ? RS_FAILED : RS_WRITTEN;
+					else result <= n_differ ? RS_DIFFER : n_failed ? RS_FAILED : n_retried ? RS_OK_RETRY : RS_OK;
 					phase  <= P_REPORT;
 					blk    <= 0;
 					sd_st  <= 0;
@@ -441,7 +527,7 @@ always @(posedge clk) begin
 			P_REPORT: begin
 				if (!jf_mounted) phase <= P_DONE;
 				else case (sd_st)
-					0: begin rep_blk_sel <= blk; sd_lba1 <= blk; sd_wr[1] <= 1; sd_st <= 1; end
+					0: if (pr_st == 0) begin rep_final <= 1; rep_blk_sel <= blk; sd_lba1 <= blk; sd_wr[1] <= 1; sd_st <= 1; end
 					1: if (sd_ack[1]) begin sd_wr[1] <= 0; sd_st <= 2; end
 					2: if (!sd_ack[1]) begin
 						if (blk == 2) begin phase <= P_DONE; sd_st <= 0; end

@@ -9,10 +9,10 @@ module tb_screen;
 	always @(posedge clk) map_data <= map[map_addr];
 	wire ce, hb, vb, hs, vs; wire [7:0] r, g, b;
 	reg [2:0] phase; reg [1:0] job, cs, fs; reg [3:0] result; reg tool;
-	reg [9:0] cur; reg [10:0] nd, nok, nre, nfa, ndi;
+	reg [9:0] cur; reg [10:0] nd, nok, nre, nfa, ndi, nwr;
 	screen dut(.clk(clk), .reset(1'b0), .phase(phase), .job(job), .result(result), .card_state(cs),
 		.file_state(fs), .from_tool(tool), .cur_sector(cur), .n_done(nd), .n_ok(nok), .n_retried(nre),
-		.n_failed(nfa), .n_differ(ndi), .map_addr(map_addr), .map_data(map_data),
+		.n_failed(nfa), .n_differ(ndi), .n_written(nwr), .map_addr(map_addr), .map_data(map_data),
 		.ce_pix(ce), .hblank(hb), .vblank(vb), .hsync(hs), .vsync(vs), .r(r), .g(g), .b(b));
 	integer f, i, x, y, scene;
 	initial begin
@@ -23,11 +23,17 @@ module tb_screen;
 			for (i = 0; i < 612; i = i + 1) map[i] = 1;
 			map[77] = 2; map[300] = 2; map[301] = 3;
 			nd = 612; nok = 609; nre = 2; nfa = 1; ndi = 0;
+			nwr = 0;
+		end else if (scene == 2) begin   // writing
+			phase = 3; job = 3; result = 0; cs = 1; fs = 1; tool = 1; cur = 300;
+			for (i = 0; i < 300; i = i + 1) map[i] = 1;
+			map[1] = 5; map[64] = 5; map[65] = 5;
+			nd = 300; nok = 297; nre = 0; nfa = 0; ndi = 0; nwr = 3;
 		end else begin          // done
 			phase = 0; job = 1; result = 2; cs = 1; fs = 1; tool = 1; cur = 1023;
 			for (i = 0; i < 1024; i = i + 1) map[i] = 1;
 			map[77] = 2;
-			nd = 1024; nok = 1023; nre = 1; nfa = 0; ndi = 0;
+			nd = 1024; nok = 1023; nre = 1; nfa = 0; ndi = 0; nwr = 0;
 		end
 		// wait for the start of a frame
 		wait (vb); wait (!vb);
