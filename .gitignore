@@ -1,0 +1,11 @@
+db/
+incremental_db/
+output_files/
+build_id.v
+*.qws
+*.vvp
+sim/*.ppm
+greybox_tmp/
+.qsys_edit/
+PLLJ_PLLSPE_INFO.txt
+*.rbf

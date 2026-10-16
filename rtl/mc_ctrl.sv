@@ -1,0 +1,482 @@
+// SS1 Memory Card Tool
+// Copyright (C) 2026 f3bandit
+//
+// This program is free software: you can redistribute it and/or modify it under the terms of
+// the GNU General Public License as published by the Free Software Foundation, either version 3
+// of the License, or (at your option) any later version.
+//
+// mc_ctrl: runs the jobs.
+//
+// Two files are mounted by MiSTer:
+//   drive 0  the card file (raw 128 KB .mcd/.mcr/.sav image): written by a backup, read by a verify
+//   drive 1  the job file (optional, written by SS1 Tool): a request in, a report out
+//
+// Job file request (block 0): "SMCQ", job (1 backup, 2 verify), 3 bytes 0, 4-byte id.
+// Job file report:            block 0  "SMCR", version, job, result, card state,
+//                                      id (4), ok, retried, failed, differ, retries (16-bit LE),
+//                                      sectors done (16-bit LE), speed
+//                             blocks 1-2  one status byte per sector (MAP_* below)
+//
+// Backup: the whole card is read into the card buffer (retrying sectors that come back
+// broken), then written to drive 0 in one go. Nothing is written when a sector couldn't be
+// read, unless "save anyway" is on. The card itself is only ever read.
+
+module mc_ctrl
+#(
+	// times in 20 MHz clock cycles (the testbench shortens them)
+	parameter HALF_FAST  = 39,       // 250 kHz bus
+	parameter HALF_SLOW  = 79,       // 125 kHz bus
+	parameter ACK_TO     = 4000,     // 200 us
+	parameter SEL_DLY    = 400,      // 20 us
+	parameter GAP        = 2000,     // 100 us between commands
+	parameter RETRY_WAIT = 20000,    // 1 ms before a retry (10 ms on the slow bus)
+	parameter POLL       = 6000000   // look for a card every 0.3 s
+)
+(
+	input             clk,
+	input             reset,
+
+	// OSD
+	input             cmd_backup,     // pulse
+	input             cmd_verify,     // pulse
+	input             opt_auto,       // back up as soon as a card file is mounted
+	input             opt_slow,       // half speed bus
+	input             opt_save_bad,   // save the backup even when sectors failed
+
+	// MiSTer file interface (hps_io, 512-byte blocks)
+	input       [1:0] img_mounted,
+	input      [63:0] img_size,
+	input             img_readonly,
+	output reg [31:0] sd_lba0,
+	output reg [31:0] sd_lba1,
+	output reg  [1:0] sd_rd,
+	output reg  [1:0] sd_wr,
+	input       [1:0] sd_ack,
+	input       [8:0] sd_buff_addr,
+	input       [7:0] sd_buff_dout,
+	input             sd_buff_wr,
+	output      [7:0] sd_buff_din0,
+	output      [7:0] sd_buff_din1,
+
+	// for the screen
+	output reg  [2:0] phase,
+	output reg  [1:0] job,
+	output reg  [3:0] result,
+	output reg  [1:0] card_state,
+	output reg  [1:0] file_state,
+	output reg  [9:0] cur_sector,
+	output reg [10:0] n_done,
+	output reg [10:0] n_ok,
+	output reg [10:0] n_retried,
+	output reg [10:0] n_failed,
+	output reg [10:0] n_differ,
+	output reg        req_from_tool,
+	input       [9:0] map_vaddr,
+	output reg  [2:0] map_vdata,
+
+	// the card
+	output            sio_sel_n,
+	output            sio_clk,
+	output            sio_cmd,
+	input             sio_dat,
+	input             sio_ack
+);
+
+// phases
+localparam P_IDLE = 0, P_CLEAR = 1, P_LOAD = 2, P_READ = 3, P_SAVE = 4, P_REPORT = 5, P_DONE = 6;
+// jobs
+localparam J_NONE = 0, J_BACKUP = 1, J_VERIFY = 2;
+// results
+localparam RS_NONE = 0, RS_OK = 1, RS_OK_RETRY = 2, RS_FAILED = 3, RS_NOCARD = 4, RS_DIFFER = 5,
+           RS_BADFILE = 6, RS_READONLY = 7, RS_SAVED_BAD = 8;
+// card state
+localparam C_NONE = 0, C_FORMATTED = 1, C_BLANK = 2;
+// file state
+localparam F_NONE = 0, F_OK = 1, F_BAD = 2;
+// sector map
+localparam MAP_NONE = 0, MAP_OK = 1, MAP_RETRY = 2, MAP_FAIL = 3, MAP_DIFFER = 4;
+
+localparam MAX_TRIES = 6;
+localparam VERSION   = 1;
+
+////////////////////////////// card buffer (128 KB) //////////////////////////////
+
+reg  [7:0] mem[0:131071];
+reg [16:0] m_addr;
+reg  [7:0] m_wdata;
+reg        m_we;
+reg  [7:0] m_q;
+always @(posedge clk) begin
+	if (m_we) mem[m_addr] <= m_wdata;
+	m_q <= mem[m_addr];
+end
+
+////////////////////////////// sector map (1024 x 3 bits) //////////////////////////////
+
+reg [2:0] map[0:1023];
+reg [9:0] map_addr;
+reg [2:0] map_wdata;
+reg       map_we;
+reg [2:0] map_q;
+wire [9:0] map_ra = (phase == P_REPORT) ? {rep_blk_sel[1], sd_buff_addr} : map_addr;
+always @(posedge clk) begin
+	if (map_we) map[map_addr] <= map_wdata;
+	map_q <= map[map_ra];
+end
+always @(posedge clk) map_vdata <= map[map_vaddr];
+
+////////////////////////////// sector reader //////////////////////////////
+
+reg         cs_start;
+reg   [9:0] cs_sector;
+reg   [1:0] cs_mode;
+wire        cs_done, cs_mismatch;
+wire  [1:0] cs_result;
+wire  [7:0] cs_hdr0, cs_hdr1;
+wire [16:0] cs_addr;
+wire  [7:0] cs_wdata;
+wire        cs_we;
+
+card_sector card_sector
+(
+	.clk(clk), .reset(reset),
+	.half_period(opt_slow ? 16'(HALF_SLOW) : 16'(HALF_FAST)),
+	.ack_timeout(16'(ACK_TO)),
+	.sel_delay(16'(SEL_DLY)),
+	.start(cs_start), .sector(cs_sector), .mode(cs_mode),
+	.busy(), .done(cs_done), .result(cs_result), .mismatch(cs_mismatch),
+	.hdr0(cs_hdr0), .hdr1(cs_hdr1),
+	.mem_addr(cs_addr), .mem_wdata(cs_wdata), .mem_we(cs_we), .mem_rdata(m_q),
+	.sio_sel_n(sio_sel_n), .sio_clk(sio_clk), .sio_cmd(sio_cmd), .sio_dat(sio_dat), .sio_ack(sio_ack)
+);
+
+localparam CS_STORE = 0, CS_COMPARE = 1, CS_PROBE = 2;
+localparam R_OK = 0, R_NOCARD = 1, R_BAD = 2, R_RANGE = 3;
+
+////////////////////////////// job file //////////////////////////////
+
+reg  [7:0] req[0:15];
+reg        req_valid;
+reg  [1:0] req_job;
+reg        jf_mounted;
+reg        req_rd;       // reading the request from the job file
+reg        cf_new;       // a card file was just mounted
+reg        cf_mounted;
+reg        cf_readonly;
+reg  [8:0] rep_blk_sel;   // which report block hps_io is reading (0..2)
+reg [10:0] n_retries;
+
+// report bytes, block 0
+reg  [7:0] rep0;
+always @(*) begin
+	case (sd_buff_addr)
+		0: rep0 = "S";  1: rep0 = "M";  2: rep0 = "C";  3: rep0 = "R";
+		4: rep0 = VERSION;
+		5: rep0 = job;
+		6: rep0 = result;
+		7: rep0 = card_state;
+		8: rep0 = req[8];  9: rep0 = req[9];  10: rep0 = req[10];  11: rep0 = req[11];
+		12: rep0 = n_ok[7:0];      13: rep0 = n_ok[10:8];
+		14: rep0 = n_retried[7:0]; 15: rep0 = n_retried[10:8];
+		16: rep0 = n_failed[7:0];  17: rep0 = n_failed[10:8];
+		18: rep0 = n_differ[7:0];  19: rep0 = n_differ[10:8];
+		20: rep0 = n_retries[7:0]; 21: rep0 = n_retries[10:8];
+		22: rep0 = n_done[7:0];    23: rep0 = n_done[10:8];
+		24: rep0 = opt_slow;
+		default: rep0 = 0;
+	endcase
+end
+assign sd_buff_din1 = rep_blk_sel ? {5'd0, map_q} : rep0;
+assign sd_buff_din0 = m_q;
+
+////////////////////////////// main state machine //////////////////////////////
+
+reg  [2:0] sd_st;        // file transfer sub-state
+reg  [8:0] blk;          // block counter
+reg [23:0] tmr;
+reg  [2:0] tries;
+reg        any_retry;
+reg  [1:0] pend_job;     // job waiting for a card or a file
+reg  [1:0] old_ack;
+reg  [2:0] nocard_run;   // sectors in a row with no card answering
+
+wire [10:0] n_done_next = n_done + 1'd1;
+
+always @(posedge clk) begin
+	cs_start <= 0;
+	map_we   <= 0;
+	old_ack  <= sd_ack;
+
+	if (reset) begin
+		phase      <= P_IDLE;
+		job        <= J_NONE;
+		pend_job   <= J_NONE;
+		result     <= RS_NONE;
+		card_state <= C_NONE;
+		file_state <= F_NONE;
+		sd_rd      <= 0;
+		sd_wr      <= 0;
+		sd_st      <= 0;
+		req_valid  <= 0;
+		jf_mounted <= 0;
+		req_rd     <= 0;
+		cf_new     <= 0;
+		cf_mounted <= 0;
+		tmr        <= 0;
+		req_from_tool <= 0;
+	end
+	else begin
+		// files being mounted (hps_io pulses img_mounted with img_size valid)
+		if (img_mounted[1]) begin
+			jf_mounted <= (img_size != 0);
+			req_valid  <= 0;
+			if (img_size != 0 && phase == P_IDLE) begin
+				// read the request in block 0
+				sd_lba1 <= 0;
+				sd_rd[1] <= 1;
+				req_rd   <= 1;
+			end
+		end
+		if (img_mounted[0]) begin
+			cf_mounted  <= (img_size == 131072);
+			cf_readonly <= img_readonly;
+			file_state  <= (img_size == 0) ? F_NONE : (img_size == 131072) ? F_OK : F_BAD;
+			if (img_size == 131072) cf_new <= 1;
+			else if (img_size != 0) begin
+				result <= RS_BADFILE;
+			end
+		end
+
+		// the request arrives
+		if (sd_ack[1] && sd_buff_wr && req_rd && sd_buff_addr < 16) req[sd_buff_addr[3:0]] <= sd_buff_dout;
+		if (sd_ack[1]) sd_rd[1] <= 0;
+		if (old_ack[1] && !sd_ack[1] && req_rd) begin
+			req_rd <= 0;
+			if (req[0] == "S" && req[1] == "M" && req[2] == "C" && req[3] == "Q" && (req[4] == J_BACKUP || req[4] == J_VERIFY)) begin
+				req_valid <= 1;
+				req_job   <= req[4][1:0];
+			end
+		end
+
+		// a new card file: do what the job file asked for (once it has been read), or back up
+		if (cf_new && !req_rd && !sd_rd[1]) begin
+			cf_new <= 0;
+			if (req_valid) begin
+				pend_job      <= req_job;
+				req_from_tool <= 1;
+				req_valid     <= 0;
+			end
+			else if (opt_auto) begin
+				pend_job      <= J_BACKUP;
+				req_from_tool <= 0;
+			end
+		end
+
+		if (cmd_backup && phase == P_IDLE) begin pend_job <= J_BACKUP; req_from_tool <= 0; end
+		if (cmd_verify && phase == P_IDLE) begin pend_job <= J_VERIFY; req_from_tool <= 0; end
+
+		if (tmr) tmr <= tmr - 1'd1;
+
+		case (phase)
+			// look at the card every 0.3 s; start a job once there is a card and a file
+			P_IDLE: begin
+				if (pend_job != J_NONE && !cf_mounted) begin
+					result   <= (file_state == F_BAD) ? RS_BADFILE : RS_NONE;
+					pend_job <= J_NONE;
+				end
+				else if (pend_job != J_NONE && card_state != C_NONE && !sd_rd[1] && sd_st == 0) begin
+					if (pend_job == J_BACKUP && cf_readonly) begin
+						job      <= J_BACKUP;
+						result   <= RS_READONLY;
+						pend_job <= J_NONE;
+						phase    <= P_REPORT;
+						blk      <= 0;
+						sd_st    <= 0;
+					end
+					else begin
+						job       <= pend_job;
+						pend_job  <= J_NONE;
+						result    <= RS_NONE;
+						n_done    <= 0;
+						n_ok      <= 0;
+						n_retried <= 0;
+						n_failed  <= 0;
+						n_differ  <= 0;
+						n_retries <= 0;
+						nocard_run <= 0;
+						any_retry <= 0;
+						cur_sector <= 0;
+						map_addr  <= 0;
+						phase     <= P_CLEAR;
+					end
+				end
+				else if (!tmr && sd_st == 0) begin
+					if (sd_st == 0) begin
+						cs_sector <= 0;
+						cs_mode   <= CS_PROBE;
+						cs_start  <= 1;
+						sd_st     <= 1;
+					end
+				end
+				else if (sd_st == 1 && cs_done) begin
+					sd_st <= 0;
+					tmr   <= 24'(POLL);
+					if (cs_result == R_NOCARD) card_state <= C_NONE;
+					else if (cs_result == R_OK) card_state <= (cs_hdr0 == "M" && cs_hdr1 == "C") ? C_FORMATTED : C_BLANK;
+					// a broken reply: keep what we had and look again
+				end
+			end
+
+			P_CLEAR: begin
+				map_wdata <= MAP_NONE;
+				map_we    <= 1;
+				map_addr  <= map_addr + 1'd1;
+				if (map_addr == 1023) begin
+					blk   <= 0;
+					sd_st <= 0;
+					phase <= (job == J_VERIFY) ? P_LOAD : P_READ;
+					tries <= 0;
+				end
+			end
+
+			// verify: the file goes into the card buffer first
+			P_LOAD: case (sd_st)
+				0: begin sd_lba0 <= blk; sd_rd[0] <= 1; sd_st <= 1; end
+				1: if (sd_ack[0]) begin sd_rd[0] <= 0; sd_st <= 2; end
+				2: if (!sd_ack[0]) begin
+					if (blk == 255) begin phase <= P_READ; sd_st <= 0; tries <= 0; end
+					else begin blk <= blk + 1'd1; sd_st <= 0; end
+				end
+			endcase
+
+			P_READ: case (sd_st)
+				0: if (!tmr) begin
+					cs_sector <= cur_sector;
+					cs_mode   <= (job == J_VERIFY) ? CS_COMPARE : CS_STORE;
+					cs_start  <= 1;
+					sd_st     <= 1;
+				end
+				1: if (cs_done) begin
+					tmr   <= 24'(GAP);
+					sd_st <= 0;
+					if (cs_result == R_OK || tries == MAX_TRIES - 1 || cs_result == R_RANGE) begin
+						// this sector is finished
+						map_addr <= cur_sector;
+						map_we   <= 1;
+						n_done   <= n_done_next;
+						if (cs_result == R_OK) begin
+							if (job == J_VERIFY && cs_mismatch) begin
+								map_wdata <= MAP_DIFFER;
+								n_differ  <= n_differ + 1'd1;
+							end
+							else if (tries) begin
+								map_wdata <= MAP_RETRY;
+								n_retried <= n_retried + 1'd1;
+							end
+							else begin
+								map_wdata <= MAP_OK;
+								n_ok      <= n_ok + 1'd1;
+							end
+						end
+						else begin
+							map_wdata <= MAP_FAIL;
+							n_failed  <= n_failed + 1'd1;
+						end
+
+						nocard_run <= (cs_result == R_NOCARD) ? nocard_run + 1'd1 : 3'd0;
+						if (cs_result == R_NOCARD && (n_done == 0 || nocard_run == 3)) begin
+							// no card after all
+							result     <= RS_NOCARD;
+							card_state <= C_NONE;
+							phase      <= P_REPORT;
+							blk        <= 0;
+						end
+						else if (cur_sector == 1023) begin
+							phase <= P_SAVE;
+							blk   <= 0;
+						end
+						else begin
+							cur_sector <= cur_sector + 1'd1;
+							tries      <= 0;
+						end
+					end
+					else begin
+						tries     <= tries + 1'd1;
+						n_retries <= n_retries + 1'd1;
+						tmr       <= opt_slow ? 24'(RETRY_WAIT * 10) : 24'(RETRY_WAIT);
+					end
+				end
+			endcase
+
+			// backup: write the card buffer to the card file
+			P_SAVE: begin
+				if (job != J_BACKUP) begin
+					result <= n_differ ? RS_DIFFER : n_failed ? RS_FAILED : n_retried ? RS_OK_RETRY : RS_OK;
+					phase  <= P_REPORT;
+					blk    <= 0;
+					sd_st  <= 0;
+				end
+				else if (n_failed && !opt_save_bad) begin
+					result <= RS_FAILED;
+					phase  <= P_REPORT;
+					blk    <= 0;
+					sd_st  <= 0;
+				end
+				else case (sd_st)
+					0: begin sd_lba0 <= blk; sd_wr[0] <= 1; sd_st <= 1; end
+					1: if (sd_ack[0]) begin sd_wr[0] <= 0; sd_st <= 2; end
+					2: if (!sd_ack[0]) begin
+						if (blk == 255) begin
+							result <= n_failed ? RS_SAVED_BAD : n_retried ? RS_OK_RETRY : RS_OK;
+							phase  <= P_REPORT;
+							blk    <= 0;
+							sd_st  <= 0;
+						end
+						else begin blk <= blk + 1'd1; sd_st <= 0; end
+					end
+				endcase
+			end
+
+			// the report goes into the job file, when SS1 Tool gave one
+			P_REPORT: begin
+				if (!jf_mounted) phase <= P_DONE;
+				else case (sd_st)
+					0: begin rep_blk_sel <= blk; sd_lba1 <= blk; sd_wr[1] <= 1; sd_st <= 1; end
+					1: if (sd_ack[1]) begin sd_wr[1] <= 0; sd_st <= 2; end
+					2: if (!sd_ack[1]) begin
+						if (blk == 2) begin phase <= P_DONE; sd_st <= 0; end
+						else begin blk <= blk + 1'd1; sd_st <= 0; end
+					end
+				endcase
+			end
+
+			// shows the result until the next job; keeps watching the card
+			P_DONE: begin
+				phase <= P_IDLE;
+				tmr   <= 24'(POLL);
+				sd_st <= 0;
+			end
+		endcase
+	end
+end
+
+// who drives the card buffer and the map
+always @(*) begin
+	m_we    = 0;
+	m_wdata = 0;
+	m_addr  = cs_addr;
+	if (phase == P_LOAD) begin
+		m_addr  = {blk[7:0], sd_buff_addr};
+		m_wdata = sd_buff_dout;
+		m_we    = sd_buff_wr & sd_ack[0];
+	end
+	else if (phase == P_SAVE) begin
+		m_addr  = {blk[7:0], sd_buff_addr};
+	end
+	else if (phase == P_READ) begin
+		m_wdata = cs_wdata;
+		m_we    = cs_we;
+	end
+end
+
+endmodule
