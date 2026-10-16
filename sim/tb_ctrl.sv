@@ -162,8 +162,9 @@ module tb;
 
 	wire sel_n, sclk, scmd, dat1, ack1_n, dat2, ack2_n, port2;
 	// the front ports: one select line each, DAT and ACK shared (open collector)
-	wire sel1_n = port2 ? 1'b1 : sel_n;
-	wire sel2_n = port2 ? sel_n : 1'b1;
+	wire pin6;   // the wiring check's select: nothing on it here
+	wire sel1_n = (port2 || pin6) ? 1'b1 : sel_n;
+	wire sel2_n = (port2 && !pin6) ? sel_n : 1'b1;
 	wire dat = dat1 & dat2;
 	wire ack_n = ack1_n & ack2_n;
 
@@ -178,7 +179,7 @@ module tb;
 		.sd_buff_din0(sd_buff_din0), .sd_buff_din1(sd_buff_din1),
 		.phase(phase), .job(job), .result(result), .card_state(card_state), .file_state(file_state),
 		.cur_sector(cur_sector), .n_done(n_done), .n_ok(n_ok), .n_retried(n_retried),
-		.n_failed(n_failed), .n_differ(n_differ), .n_written(), .req_from_tool(), .step(), .port2(port2), .pad_on(), .pad_id(), .pad_btn(), .pad_ana(), .pad_card(),
+		.n_failed(n_failed), .n_differ(n_differ), .n_written(), .req_from_tool(), .step(), .port2(port2), .pad_on(), .pad_id(), .pad_btn(), .pad_ana(), .pad_card(), .pin6(pin6), .bus_low(7'd0), .wdiag(),
 		.map_vaddr(10'd0), .map_vdata(),
 		.sio_sel_n(sel_n), .sio_clk(sclk), .sio_cmd(scmd), .sio_dat(dat), .sio_ack(ack_n)
 	);
@@ -384,6 +385,7 @@ module tb;
 		check("port 2 controller", dut.pad_on[1] && dut.pad_id[15:8] == 8'h73 && dut.pad_btn[31:16] == 16'h0108 && dut.pad_ana[63:32] == 32'hA0B0C0D0);
 		check("both in the report", file1[3] == "P" && file1[4] == 4 && file1[5] == 4 && file1[32] == 1 && file1[33] == 1 && file1[34] == 8'h73 && file1[35] == 8'h11 && file1[36] == 8'h40 && file1[37] == 8'h40 && file1[40] == 8'h10
 		      && file1[48] == 2 && file1[49] == 1 && file1[50] == 8'h73 && file1[51] == 8'h08 && file1[52] == 8'h01 && file1[53] == 8'hD0 && file1[56] == 8'hA0 && file1[59] == 1);
+		check("wiring check: nothing on pin 6, tried", file1[67] == 0 && dut.scn != 0);
 		check("memory cards: port 1 yes, port 2 no", dut.pad_card == 4'b0001 && file1[42] == 1 && file1[58] == 0);
 		// a receiver whose controller pairs late: first refuses analog, later accepts it
 		card2.pad_analog = 0; card2.pad_switches = 0; card2.refuse = 1;

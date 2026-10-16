@@ -75,3 +75,7 @@ localparam SX_LX = 16;
 localparam SX_LY = 23;
 localparam SX_RX = 38;
 localparam SX_RY = 45;
+localparam WX_P1 = 13;
+localparam WX_P2 = 21;
+localparam WX_P6 = 31;
+localparam WX_ID = 44;

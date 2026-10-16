@@ -12,7 +12,7 @@ module tb_screen;
 	reg [9:0] cur; reg [10:0] nd, nok, nre, nfa, ndi, nwr;
 	reg [1:0] pon = 0; reg [15:0] pid = 0; reg [31:0] pbtn = 0; reg [63:0] pana = 0; reg [3:0] pcard = 0;
 	screen dut(.clk(clk), .reset(1'b0), .phase(phase), .job(job), .result(result), .card_state(cs),
-		.file_state(fs), .from_tool(tool), .step(2'd0), .port2(1'b0), .pad_on(pon), .pad_id(pid), .pad_btn(pbtn), .pad_ana(pana), .pad_card(pcard), .cur_sector(cur), .n_done(nd), .n_ok(nok), .n_retried(nre),
+		.file_state(fs), .from_tool(tool), .step(2'd0), .port2(1'b0), .pad_on(pon), .pad_id(pid), .pad_btn(pbtn), .pad_ana(pana), .pad_card(pcard), .wdiag(40'h0001100818), .cur_sector(cur), .n_done(nd), .n_ok(nok), .n_retried(nre),
 		.n_failed(nfa), .n_differ(ndi), .n_written(nwr), .map_addr(map_addr), .map_data(map_data),
 		.ce_pix(ce), .hblank(hb), .vblank(vb), .hsync(hs), .vsync(vs), .r(r), .g(g), .b(b));
 	integer f, i, x, y, scene;

@@ -76,6 +76,7 @@ and a job file (drive 1). The job file asks for the job and gets the report back
 | 32 | | controller test, port 1: port (1), controller there (0/1), its ID, buttons (16-bit, pressed = 1: Select L3 R3 Start Up Right Down Left L2 R2 L1 R1 Triangle Circle Cross Square), RX RY LX LY, a counter, memory card (0 none, 1 formatted, 2 not formatted), analog mode asked for (0/1) |
 | 44 | | controller test: analog switches sent so far |
 | 48 | | controller test, port 2: the same as port 1 at 32 (port is 2) |
+| 64 | | controller test, wiring check: the pins something pulled low (bit n = USER_IN[n]) while reading port 1, port 2 (65), and with USER_OUT[6] as the select (66); a controller answered on USER_OUT[6] (67), its ID (68) |
 | 512 | write: one byte per sector, non-zero = write it even if it already matches | one byte per sector: 1 OK, 2 retried, 3 failed, 4 different, 5 written and checked |
 
 The job file is 1536 bytes.

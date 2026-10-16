@@ -83,6 +83,9 @@ module mc_ctrl
 	output reg        req_from_tool,
 	output reg  [1:0] step,         // SS1 Tool's copy: 1 the backup before writing, 2 the write
 	output reg        port2,        // the front port used: 0 port 1, 1 port 2
+	output reg        pin6,         // controller test, wiring check: select on USER_OUT[6] instead
+	input       [6:0] bus_low,      // USER_IN pins something else pulls low
+	output     [39:0] wdiag,        // wiring check: {pin 6 ID, pin 6 answered, pin 6 pins, port 2 pins, port 1 pins}
 	// controller test, both front ports: [port 1, then port 2 in the upper half]
 	output reg  [1:0] pad_on,       // a controller answers
 	output reg [15:0] pad_id,
@@ -196,6 +199,13 @@ reg  [1:0] cfg1, cfg2;   // switching that port's controller to analog: the next
 reg  [1:0] tried;        // the switch was sent to that port's controller (until it's unplugged)
 reg  [5:0] swc1, swc2;   // reads until the switch is sent again while that pad stays digital
 reg  [7:0] sw_cnt;       // analog switches sent
+// wiring check: the pins pulled low during the last read of port 1, port 2 and with pin 6 as
+// the select, and whether a controller answered on pin 6
+reg  [6:0] acc, act1, act2, act6;
+reg        on6, scanning;
+reg  [7:0] id6;
+reg  [4:0] scn;          // reads until the next pin 6 try
+assign wdiag = {id6, 7'd0, on6, 1'b0, act6, 1'b0, act2, 1'b0, act1};
 wire [1:0] cfg_pp = pp ? cfg2 : cfg1;
 wire [5:0] pn_pp  = pp ? pad_n2 : pad_n1;
 reg        jf_full;      // the job file has all 3 blocks
@@ -245,6 +255,8 @@ always @(*) begin
 		42: rep0 = pad_card[1:0];      58: rep0 = pad_card[3:2];
 		43: rep0 = tried[0];           59: rep0 = tried[1];
 		44: rep0 = sw_cnt;
+		// wiring check: pins pulled low (bit n = USER_IN[n]) for port 1, port 2, pin 6 as select
+		64: rep0 = act1;  65: rep0 = act2;  66: rep0 = act6;  67: rep0 = on6;  68: rep0 = id6;
 		default: rep0 = 0;
 	endcase
 end
@@ -337,6 +349,14 @@ always @(posedge clk) begin
 		pad_n2     <= 0;
 		swc1       <= 0;
 		swc2       <= 0;
+		pin6       <= 0;
+		scn        <= 5'd4;
+		scanning   <= 0;
+		act1       <= 0;
+		act2       <= 0;
+		act6       <= 0;
+		on6        <= 0;
+		id6        <= 0;
 		cfg1       <= 0;
 		cfg2       <= 0;
 		sw_cnt     <= 0;
@@ -351,6 +371,8 @@ always @(posedge clk) begin
 		req_from_tool <= 0;
 	end
 	else begin
+		if (phase != P_PAD) pin6 <= 0;   // the wiring check's select only ever in the controller test
+
 		// files being mounted (hps_io pulses img_mounted with img_size valid)
 		if (img_mounted[1]) begin
 			jf_mounted <= (img_size != 0);
@@ -498,6 +520,7 @@ always @(posedge clk) begin
 					tries <= 0;
 					// the controller test starts from scratch
 					pp <= 0; pad_n1 <= 0; pad_n2 <= 0; cfg1 <= 0; cfg2 <= 0; tried <= 0; swc1 <= 0; swc2 <= 0;
+					scn <= 5'd4; act1 <= 0; act2 <= 0; act6 <= 0; on6 <= 0; id6 <= 0; pin6 <= 0;
 					pad_on <= 0; pad_card <= 0; pad_btn <= 0; pad_cnt <= 0;
 				end
 			end
@@ -624,17 +647,34 @@ always @(posedge clk) begin
 			// card in the same port once a second. It runs until a new job file or a reset.
 			P_PAD: case (sd_st)
 				0: if (!tmr) begin
+					scanning  <= (scn == 0);
 					port2     <= pp;
-					cs_pad    <= (pn_pp != 0) || (cfg_pp != 0);
-					cs_pcmd   <= cfg_pp;
+					pin6      <= (scn == 0);
+					acc       <= 0;
+					cs_pad    <= (scn == 0) || (pn_pp != 0) || (cfg_pp != 0);
+					cs_pcmd   <= (scn == 0) ? 2'd0 : cfg_pp;
 					cs_sector <= 0;
 					cs_mode   <= CS_PROBE;
 					cs_start  <= 1;
 					sd_st     <= 1;
 				end
-				1: if (cs_done) begin
+				1: if (!cs_done) begin
+					if (!sio_sel_n) acc <= acc | bus_low;
+				end
+				else begin
 					sd_st <= 0;
 					tmr   <= 24'(PAD_GAP);
+					pin6  <= 0;
+					if (scanning) begin
+						// the wiring check's read: record it, don't touch the ports
+						act6 <= acc;
+						on6  <= (cs_result == R_OK);
+						id6  <= (cs_result == R_OK) ? cs_pid : 8'd0;
+						scn  <= 5'd30;
+					end
+					else begin
+					if (scn != 0) scn <= scn - 1'd1;
+					if (pp) act2 <= acc; else act1 <= acc;
 					pp    <= ~pp;
 					if (cs_pad && cs_pcmd != 0) begin
 						// a step of the switch to analog: on to the next one
@@ -684,6 +724,7 @@ always @(posedge clk) begin
 						if (pp) pad_card[3:2] <= (cs_result == R_NOCARD) ? C_NONE : (cs_result == R_OK) ? ((cs_hdr0 == "M" && cs_hdr1 == "C") ? C_FORMATTED : C_BLANK) : pad_card[3:2];
 						else    pad_card[1:0] <= (cs_result == R_NOCARD) ? C_NONE : (cs_result == R_OK) ? ((cs_hdr0 == "M" && cs_hdr1 == "C") ? C_FORMATTED : C_BLANK) : pad_card[1:0];
 						if (pp) pad_n2 <= 6'd60; else pad_n1 <= 6'd60;
+					end
 					end
 				end
 			endcase
