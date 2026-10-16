@@ -16,6 +16,14 @@
 // The data goes to the card buffer as it arrives (MODE_STORE), is compared with what is there
 // already (MODE_COMPARE), or is only looked at (MODE_PROBE: the first two bytes are kept so the
 // caller can see the "MC" header of sector 0).
+//
+// Controllers (pad = 1), how many bytes follows from the ID the controller sends back:
+//   0 read          01 42 00 00 00 ...            -- ID 5A buttons(lo, hi) [RX RY LX LY]
+//   1 enter config  01 43 00 01 00 [00 00 00 00]
+//   2 analog on     01 44 00 01 02 00 00 00 00    (02: the ANALOG button still works)
+//   3 leave config  01 43 00 00 5A 5A 5A 5A 5A
+// A DualShock (or a receiver acting as one) starts in digital mode, where the left stick works
+// as the D-pad and the sticks aren't sent; 1-2-3 switches it to analog.
 
 module card_sector
 (
@@ -27,7 +35,8 @@ module card_sector
 	input      [15:0] sel_delay,    // clk cycles between select and the first bit
 
 	input             start,
-	input             pad,          // with start: read the controller instead (sector/mode unused)
+	input             pad,          // with start: talk to the controller instead (sector/mode unused)
+	input       [1:0] pcmd,         // controller: 0 read it, 1 enter config, 2 analog mode on, 3 leave config
 	input       [9:0] sector,
 	input       [1:0] mode,
 	output reg        busy,
@@ -84,7 +93,8 @@ wire [7:0] lsb = sec[7:0];
 wire [7:0] didx = idx - 8'd10;   // read: data comes back during bytes 10..137
 wire [7:0] widx = idx - 8'd6;    // write: data goes out in bytes 6..133
 wire       wr   = (md == MODE_WRITE);
-reg        pd;       // reading a controller
+reg        pd;       // talking to a controller
+reg  [1:0] pc;       // which command
 reg  [7:0] pad_last; // its last byte: 2 + 2 x the halfwords its ID announces
 wire [7:0] last_idx = pd ? pad_last : wr ? 8'd137 : 8'd139;
 wire [3:0] pad_n = (b_rx[3:0] == 0) ? 4'd1 : b_rx[3:0];
@@ -106,6 +116,7 @@ always @(posedge clk) begin
 			sec       <= sector;
 			md        <= mode;
 			pd        <= pad;
+			pc        <= pad ? pcmd : 2'd0;
 			pad_last  <= 8'd255;
 			sio_sel_n <= 0;
 			cnt       <= sel_delay;
@@ -128,8 +139,14 @@ always @(posedge clk) begin
 
 		S_SEND: begin
 			if (pd) begin
-				// controller: 01 42 00 00 00 ...  reply -- ID 5A buttons(lo, hi) [RX RY LX LY]
-				b_tx <= (idx == 0) ? 8'h01 : (idx == 1) ? 8'h42 : 8'h00;
+				case (idx)
+					0:       b_tx <= 8'h01;
+					1:       b_tx <= (pc == 0) ? 8'h42 : (pc == 2) ? 8'h44 : 8'h43;
+					2:       b_tx <= 8'h00;
+					3:       b_tx <= (pc == 1 || pc == 2) ? 8'h01 : 8'h00;
+					4:       b_tx <= (pc == 2) ? 8'h02 : (pc == 3) ? 8'h5A : 8'h00;
+					default: b_tx <= (pc == 3) ? 8'h5A : 8'h00;
+				endcase
 			end
 			else if (wr) begin
 				// write: 81 57 00 00 MSB LSB [data x128] CHK 00 00 00
@@ -163,9 +180,9 @@ always @(posedge clk) begin
 					0: if (!b_ack) res <= R_NOCARD;   // no controller
 					1: begin pad_id <= b_rx; pad_last <= 8'd2 + {pad_n, 1'b0}; if (b_rx == 8'hFF) res <= R_BAD; end
 					2: if (b_rx != 8'h5A) res <= R_BAD;
-					3: pad_btn[7:0]  <= b_rx;
-					4: pad_btn[15:8] <= b_rx;
-					default: if (pidx < 6) pad_ana[(pidx - 8'd2) * 8 +: 8] <= b_rx;
+					3: if (pc == 0) pad_btn[7:0]  <= b_rx;
+					4: if (pc == 0) pad_btn[15:8] <= b_rx;
+					default: if (pc == 0 && pidx < 6) pad_ana[(pidx - 8'd2) * 8 +: 8] <= b_rx;
 				endcase
 			end
 			else if (wr) case (idx)

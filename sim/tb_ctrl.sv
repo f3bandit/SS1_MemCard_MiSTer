@@ -28,6 +28,11 @@ module card_model
 	integer    pad_present = 1;
 	reg [15:0] pad_raw = 16'hFFFF;    // active low
 	reg [31:0] pad_ana = 32'h80808080;
+	reg        pad_analog = 1;      // sends 73 (analog); 0: 41 (digital) until switched
+	reg        pad_cfg = 0;         // in config mode (sends F3)
+	reg  [7:0] pad_cmd;
+	integer    pad_len;
+	integer    pad_switches = 0;    // times it was put into analog mode
 	reg  [7:0] wbuf[0:127];
 	reg  [7:0] wchk;
 	integer    writes = 0;
@@ -56,7 +61,7 @@ module card_model
 		begin
 			if (pmode) begin
 				case (i)
-					0: reply = 8'h73;
+					0: reply = pad_cfg ? 8'hF3 : pad_analog ? 8'h73 : 8'h41;
 					1: reply = 8'h5A;
 					2: reply = pad_raw[7:0];
 					3: reply = pad_raw[15:8];
@@ -94,8 +99,11 @@ module card_model
 			// in_sh is the byte just received (index idx); out byte for idx+1 is prepared now
 			if (idx == 0 && in_sh == 8'h01 && pad_present) pmode = 1;
 			else if (idx == 0 && (in_sh != 8'h81 || !present)) begin active = 0; disable respond; end
-			if (idx == 1 && pmode) ;
-			else if (idx == 1) begin
+			if (idx == 0 && pmode) pad_len = (!pad_cfg && !pad_analog) ? 5 : 9;
+			if (idx == 1 && pmode) pad_cmd = in_sh;
+			if (idx == 3 && pmode && pad_cmd == 8'h43) pad_cfg = in_sh[0];
+			if (idx == 3 && pmode && pad_cmd == 8'h44 && pad_cfg) begin pad_analog = in_sh[0]; pad_switches = pad_switches + 1; end
+			if (idx == 1 && !pmode) begin
 				if (in_sh == 8'h52) wmode = 0;
 				else if (in_sh == 8'h57) wmode = 1;
 				else begin active = 0; disable respond; end
@@ -118,7 +126,7 @@ module card_model
 			end
 			out_sh = reply(idx);
 			idx = idx + 1;
-			if (idx < (pmode ? 9 : wmode ? 138 : 140)) begin
+			if (idx < (pmode ? pad_len : wmode ? 138 : 140)) begin
 				#(ack_delay) ack_n = 0;
 				#200 ack_n = 1;
 			end
@@ -151,7 +159,12 @@ module tb;
 	wire  [9:0] cur_sector;
 	wire [10:0] n_done, n_ok, n_retried, n_failed, n_differ;
 
-	wire sel_n, sclk, scmd, dat, ack_n;
+	wire sel_n, sclk, scmd, dat1, ack1_n, dat2, ack2_n, port2;
+	// the front ports: one select line each, DAT and ACK shared (open collector)
+	wire sel1_n = port2 ? 1'b1 : sel_n;
+	wire sel2_n = port2 ? sel_n : 1'b1;
+	wire dat = dat1 & dat2;
+	wire ack_n = ack1_n & ack2_n;
 
 	mc_ctrl #(.HALF_FAST(3), .HALF_SLOW(6), .ACK_TO(60), .SEL_DLY(4), .GAP(10), .RETRY_WAIT(20), .POLL(2000), .PROGRESS(50000), .PAD_GAP(2000)) dut
 	(
@@ -164,12 +177,14 @@ module tb;
 		.sd_buff_din0(sd_buff_din0), .sd_buff_din1(sd_buff_din1),
 		.phase(phase), .job(job), .result(result), .card_state(card_state), .file_state(file_state),
 		.cur_sector(cur_sector), .n_done(n_done), .n_ok(n_ok), .n_retried(n_retried),
-		.n_failed(n_failed), .n_differ(n_differ), .n_written(), .req_from_tool(), .step(), .port2(), .pad_on(), .pad_id(), .pad_btn(), .pad_ana(),
+		.n_failed(n_failed), .n_differ(n_differ), .n_written(), .req_from_tool(), .step(), .port2(port2), .pad_on(), .pad_id(), .pad_btn(), .pad_ana(), .pad_card(),
 		.map_vaddr(10'd0), .map_vdata(),
 		.sio_sel_n(sel_n), .sio_clk(sclk), .sio_cmd(scmd), .sio_dat(dat), .sio_ack(ack_n)
 	);
 
-	card_model card(.sel_n(sel_n), .sclk(sclk), .cmd(scmd), .dat(dat), .ack_n(ack_n));
+	card_model card(.sel_n(sel1_n), .sclk(sclk), .cmd(scmd), .dat(dat1), .ack_n(ack1_n));
+	card_model card2(.sel_n(sel2_n), .sclk(sclk), .cmd(scmd), .dat(dat2), .ack_n(ack2_n));   // front port 2
+	initial begin card2.present = 0; card2.pad_present = 0; end
 
 	// the two files
 	reg [7:0] file0[0:131071];
@@ -337,7 +352,7 @@ module tb;
 		check("step 2 shown", dut.step == 2);
 		wait_done();
 		check("forced: identical sectors written anyway", card.writes == 65 && dut.n_written == 65 && result == 9 && file1[512 + 64] == 5 && file1[512 + 2] == 1);
-		check("report says version 3", file1[4] == 3);
+		check("report says version 4", file1[4] == 4);
 
 		// 9. the next request without forced sectors writes nothing that matches
 		file1[0] = "S"; file1[1] = "M"; file1[2] = "C"; file1[3] = "Q"; file1[4] = 3; file1[6] = 0;
@@ -349,22 +364,33 @@ module tb;
 		wait_done();
 		check("forced list cleared by the next request", card.writes == 0 && dut.n_written == 0 && dut.step == 0);
 
-		// 10. controller test on front port 2: buttons and sticks reach the report; a new job ends it
+		// 10. controller test, both ports: port 1 a DualShock in analog mode with a card, port 2 a
+		// pad that starts digital (switched to analog by the core) and no card; a new job ends it
 		for (i = 0; i < 1536; i = i + 1) file1[i] = 0;
-		file1[0] = "S"; file1[1] = "M"; file1[2] = "C"; file1[3] = "Q"; file1[4] = 4; file1[7] = 2;
+		file1[0] = "S"; file1[1] = "M"; file1[2] = "C"; file1[3] = "Q"; file1[4] = 4;
 		card.pad_raw = ~16'h4011;      // Cross, Up and Select held
 		card.pad_ana = 32'h10203040;   // RX 40 RY 30 LX 20 LY 10
+		card2.pad_present = 1; card2.pad_analog = 0;
+		card2.pad_raw = ~16'h0108;     // Start and L2
+		card2.pad_ana = 32'hA0B0C0D0;
 		mount(1, 1536);
 		repeat (20000) @(posedge clk);
 		mount(0, 131072);
 		wait (phase == 7);
 		repeat (400000) @(posedge clk);
-		check("controller test on port 2", dut.port2 == 1 && dut.pad_on && dut.pad_id == 8'h73 && dut.pad_btn == 16'h4011 && dut.pad_ana == 32'h10203040);
-		check("controller in the report", file1[3] == "P" && file1[5] == 4 && file1[32] == 2 && file1[33] == 1 && file1[34] == 8'h73 && file1[35] == 8'h11 && file1[36] == 8'h40 && file1[37] == 8'h40 && file1[40] == 8'h10);
-		check("memory card seen in that port", card_state == 1);
-		card.pad_present = 0;
+		check("port 1 controller", dut.pad_on[0] && dut.pad_id[7:0] == 8'h73 && dut.pad_btn[15:0] == 16'h4011 && dut.pad_ana[31:0] == 32'h10203040);
+		check("port 2 switched to analog", card2.pad_switches == 1 && card2.pad_analog && !card2.pad_cfg);
+		check("port 2 controller", dut.pad_on[1] && dut.pad_id[15:8] == 8'h73 && dut.pad_btn[31:16] == 16'h0108 && dut.pad_ana[63:32] == 32'hA0B0C0D0);
+		check("both in the report", file1[3] == "P" && file1[4] == 4 && file1[5] == 4 && file1[32] == 1 && file1[33] == 1 && file1[34] == 8'h73 && file1[35] == 8'h11 && file1[36] == 8'h40 && file1[37] == 8'h40 && file1[40] == 8'h10
+		      && file1[48] == 2 && file1[49] == 1 && file1[50] == 8'h73 && file1[51] == 8'h08 && file1[52] == 8'h01 && file1[53] == 8'hD0 && file1[56] == 8'hA0 && file1[59] == 1);
+		check("memory cards: port 1 yes, port 2 no", dut.pad_card == 4'b0001 && file1[42] == 1 && file1[58] == 0);
+		card2.pad_present = 0;
 		repeat (400000) @(posedge clk);
-		check("controller unplugged", !dut.pad_on && dut.pad_btn == 0 && file1[33] == 0);
+		check("port 2 unplugged, port 1 still read", !dut.pad_on[1] && dut.pad_btn[31:16] == 0 && file1[49] == 0 && dut.pad_on[0] && file1[33] == 1);
+		card2.pad_present = 1; card2.pad_analog = 0;
+		repeat (400000) @(posedge clk);
+		check("plugged back in: switched again", card2.pad_switches == 2 && dut.pad_id[15:8] == 8'h73);
+		card2.pad_present = 0;
 		card.pad_present = 1;
 		for (i = 0; i < 1536; i = i + 1) file1[i] = 0;
 		file1[0] = "S"; file1[1] = "M"; file1[2] = "C"; file1[3] = "Q"; file1[4] = 1;

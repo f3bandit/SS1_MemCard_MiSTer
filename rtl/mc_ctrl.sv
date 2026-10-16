@@ -39,7 +39,7 @@ module mc_ctrl
 	parameter POLL       = 6000000,  // look for a card every 0.3 s
 	parameter PROGRESS   = 5000000,  // progress into the job file every 0.25 s
 	parameter WRITE_GAP  = 100000,   // 5 ms after writing a sector before reading it back
-	parameter PAD_GAP    = 330000    // controller test: a read every ~16 ms
+	parameter PAD_GAP    = 165000    // controller test: a read every ~8 ms, the two ports in turn
 )
 (
 	input             clk,
@@ -83,11 +83,13 @@ module mc_ctrl
 	output reg        req_from_tool,
 	output reg  [1:0] step,         // SS1 Tool's copy: 1 the backup before writing, 2 the write
 	output reg        port2,        // the front port used: 0 port 1, 1 port 2
-	output reg        pad_on,       // controller test: a controller answers
-	output reg  [7:0] pad_id,
-	output reg [15:0] pad_btn,      // pressed = 1: 0 Select 1 L3 2 R3 3 Start 4 Up 5 Right 6 Down 7 Left
+	// controller test, both front ports: [port 1, then port 2 in the upper half]
+	output reg  [1:0] pad_on,       // a controller answers
+	output reg [15:0] pad_id,
+	output reg [31:0] pad_btn,      // pressed = 1: 0 Select 1 L3 2 R3 3 Start 4 Up 5 Right 6 Down 7 Left
 	                                //              8 L2 9 R2 10 L1 11 R1 12 Triangle 13 Circle 14 Cross 15 Square
-	output reg [31:0] pad_ana,      // RX RY LX LY
+	output reg [63:0] pad_ana,      // RX RY LX LY
+	output reg  [3:0] pad_card,     // memory card in that port: 0 none, 1 formatted, 2 not formatted
 	input       [9:0] map_vaddr,
 	output reg  [2:0] map_vdata,
 
@@ -114,7 +116,8 @@ localparam F_NONE = 0, F_OK = 1, F_BAD = 2;
 localparam MAP_NONE = 0, MAP_OK = 1, MAP_RETRY = 2, MAP_FAIL = 3, MAP_DIFFER = 4, MAP_WRITTEN = 5;
 
 localparam MAX_TRIES = 6;
-localparam VERSION   = 3;   // 2: request flags (step 1/2 of a copy) and forced sectors; 3: front port 2, controller test
+localparam VERSION   = 4;   // 2: request flags (step 1/2 of a copy) and forced sectors; 3: front port 2, controller test
+                            // 4: the controller test reads both ports and switches DualShocks to analog
 
 ////////////////////////////// card buffer (128 KB) //////////////////////////////
 
@@ -154,7 +157,8 @@ wire [16:0] cs_addr;
 wire  [7:0] cs_wdata;
 wire        cs_we;
 
-reg         cs_pad;    // in the controller test: read the controller (else the card)
+reg         cs_pad;    // in the controller test: talk to the controller (else look for a card)
+reg   [1:0] cs_pcmd;   // 0 read it, 1-3 the steps that switch a DualShock to analog
 wire  [7:0] cs_pid;
 wire [15:0] cs_pbtn;
 wire [31:0] cs_pana;
@@ -165,7 +169,7 @@ card_sector card_sector
 	.half_period(opt_slow ? 16'(HALF_SLOW) : 16'(HALF_FAST)),
 	.ack_timeout(16'(ACK_TO)),
 	.sel_delay(16'(SEL_DLY)),
-	.start(cs_start), .pad(cs_pad && phase == P_PAD), .sector(cs_sector), .mode(cs_mode),
+	.start(cs_start), .pad(cs_pad && phase == P_PAD), .pcmd(cs_pcmd), .sector(cs_sector), .mode(cs_mode),
 	.pad_id(cs_pid), .pad_btn(cs_pbtn), .pad_ana(cs_pana),
 	.busy(), .done(cs_done), .result(cs_result), .mismatch(cs_mismatch),
 	.hdr0(cs_hdr0), .hdr1(cs_hdr1),
@@ -186,7 +190,13 @@ reg        req_rd;       // reading the request from the job file
 reg  [1:0] req_blk;      // which of its 3 blocks
 reg        req_port2;    // the request is for front port 2
 reg  [7:0] pad_cnt;      // controller test: reads so far
-reg  [5:0] pad_n;        // reads until the next look for a memory card
+reg        pp;           // the port being read: 0 port 1, 1 port 2
+reg  [5:0] pad_n1, pad_n2;   // reads until the next look for a memory card in that port
+reg  [1:0] cfg1, cfg2;   // switching that port's controller to analog: the next step (0 none)
+reg  [1:0] tried;        // the switch was sent to that port's controller (until it's unplugged)
+reg  [7:0] sw_cnt;       // analog switches sent
+wire [1:0] cfg_pp = pp ? cfg2 : cfg1;
+wire [5:0] pn_pp  = pp ? pad_n2 : pad_n1;
 reg        jf_full;      // the job file has all 3 blocks
 reg [1023:0] force_wr;   // write job: sectors to write even when they already match
 reg        cf_new;       // a card file was just mounted
@@ -219,12 +229,21 @@ always @(*) begin
 		28: rep0 = n_written[7:0]; 29: rep0 = n_written[10:8];
 		25: rep0 = phase;
 		26: rep0 = cur_sector[7:0]; 27: rep0 = cur_sector[9:8];
-		32: rep0 = port2 ? 8'd2 : 8'd1;
-		33: rep0 = pad_on;
-		34: rep0 = pad_id;
-		35: rep0 = pad_btn[7:0];  36: rep0 = pad_btn[15:8];
-		37: rep0 = pad_ana[7:0];  38: rep0 = pad_ana[15:8];  39: rep0 = pad_ana[23:16];  40: rep0 = pad_ana[31:24];
-		41: rep0 = pad_cnt;
+		// controller test: port 1 at 32, port 2 at 48 (port, answers, ID, buttons x2, RX RY LX LY,
+		// reads so far, memory card, analog switch sent)
+		32: rep0 = 1;  48: rep0 = 2;
+		33: rep0 = pad_on[0];          49: rep0 = pad_on[1];
+		34: rep0 = pad_id[7:0];        50: rep0 = pad_id[15:8];
+		35: rep0 = pad_btn[7:0];       51: rep0 = pad_btn[23:16];
+		36: rep0 = pad_btn[15:8];      52: rep0 = pad_btn[31:24];
+		37: rep0 = pad_ana[7:0];       53: rep0 = pad_ana[39:32];
+		38: rep0 = pad_ana[15:8];      54: rep0 = pad_ana[47:40];
+		39: rep0 = pad_ana[23:16];     55: rep0 = pad_ana[55:48];
+		40: rep0 = pad_ana[31:24];     56: rep0 = pad_ana[63:56];
+		41: rep0 = pad_cnt;            57: rep0 = pad_cnt;
+		42: rep0 = pad_card[1:0];      58: rep0 = pad_card[3:2];
+		43: rep0 = tried[0];           59: rep0 = tried[1];
+		44: rep0 = sw_cnt;
 		default: rep0 = 0;
 	endcase
 end
@@ -311,6 +330,14 @@ always @(posedge clk) begin
 		port2      <= 0;
 		pad_on     <= 0;
 		pad_cnt    <= 0;
+		pad_card   <= 0;
+		tried      <= 0;
+		pad_n1     <= 0;
+		pad_n2     <= 0;
+		cfg1       <= 0;
+		cfg2       <= 0;
+		sw_cnt     <= 0;
+		pp         <= 0;
 		req_port2  <= 0;
 		req_blk    <= 0;
 		rep_final  <= 1;
@@ -466,6 +493,9 @@ always @(posedge clk) begin
 					sd_st <= 0;
 					phase <= (job == J_VERIFY || job == J_WRITE) ? P_LOAD : (job == J_BACKUP) ? P_READ : (job == J_PAD) ? P_PAD : P_IDLE;
 					tries <= 0;
+					// the controller test starts from scratch
+					pp <= 0; pad_n1 <= 0; pad_n2 <= 0; cfg1 <= 0; cfg2 <= 0; tried <= 0;
+					pad_on <= 0; pad_card <= 0; pad_btn <= 0; pad_cnt <= 0;
 				end
 			end
 
@@ -591,7 +621,9 @@ always @(posedge clk) begin
 			// card in the same port once a second. It runs until a new job file or a reset.
 			P_PAD: case (sd_st)
 				0: if (!tmr) begin
-					cs_pad    <= (pad_n != 0);
+					port2     <= pp;
+					cs_pad    <= (pn_pp != 0) || (cfg_pp != 0);
+					cs_pcmd   <= cfg_pp;
 					cs_sector <= 0;
 					cs_mode   <= CS_PROBE;
 					cs_start  <= 1;
@@ -600,21 +632,47 @@ always @(posedge clk) begin
 				1: if (cs_done) begin
 					sd_st <= 0;
 					tmr   <= 24'(PAD_GAP);
-					if (cs_pad) begin
-						pad_on  <= (cs_result == R_OK);
-						pad_cnt <= pad_cnt + 1'd1;
+					pp    <= ~pp;
+					if (cs_pad && cs_pcmd != 0) begin
+						// a step of the switch to analog: on to the next one
+						if (pp) cfg2 <= (cfg2 == 3) ? 2'd0 : cfg2 + 1'd1;
+						else    cfg1 <= (cfg1 == 3) ? 2'd0 : cfg1 + 1'd1;
+					end
+					else if (cs_pad) begin
+						if (!pp) pad_cnt <= pad_cnt + 1'd1;
+						if (pp) pad_n2 <= pad_n2 - 1'd1; else pad_n1 <= pad_n1 - 1'd1;
+						if (pp) pad_on[1] <= (cs_result == R_OK); else pad_on[0] <= (cs_result == R_OK);
 						if (cs_result == R_OK) begin
-							pad_id  <= cs_pid;
-							pad_btn <= ~cs_pbtn;
-							pad_ana <= (cs_pid[3:0] >= 3) ? cs_pana : 32'h80808080;
+							if (pp) begin
+								pad_id[15:8]   <= cs_pid;
+								pad_btn[31:16] <= ~cs_pbtn;
+								pad_ana[63:32] <= (cs_pid[3:0] >= 3) ? cs_pana : 32'h80808080;
+							end
+							else begin
+								pad_id[7:0]    <= cs_pid;
+								pad_btn[15:0]  <= ~cs_pbtn;
+								pad_ana[31:0]  <= (cs_pid[3:0] >= 3) ? cs_pana : 32'h80808080;
+							end
+							// a digital pad that may be a DualShock: ask for analog mode, once
+							if (cs_pid == 8'h41 && !tried[pp]) begin
+								if (pp) cfg2 <= 1; else cfg1 <= 1;
+								tried[pp] <= 1;
+								sw_cnt    <= sw_cnt + 1'd1;
+							end
+							// left in config mode somehow: leave it
+							if (cs_pid == 8'hF3) begin
+								if (pp) cfg2 <= 3; else cfg1 <= 3;
+							end
 						end
-						else pad_btn <= 0;
-						pad_n <= pad_n - 1'd1;
+						else begin
+							if (pp) pad_btn[31:16] <= 0; else pad_btn[15:0] <= 0;
+							if (cs_result == R_NOCARD) tried[pp] <= 0;   // unplugged: switch it again when it's back
+						end
 					end
 					else begin
-						if (cs_result == R_NOCARD) card_state <= C_NONE;
-						else if (cs_result == R_OK) card_state <= (cs_hdr0 == "M" && cs_hdr1 == "C") ? C_FORMATTED : C_BLANK;
-						pad_n <= 6'd60;
+						if (pp) pad_card[3:2] <= (cs_result == R_NOCARD) ? C_NONE : (cs_result == R_OK) ? ((cs_hdr0 == "M" && cs_hdr1 == "C") ? C_FORMATTED : C_BLANK) : pad_card[3:2];
+						else    pad_card[1:0] <= (cs_result == R_NOCARD) ? C_NONE : (cs_result == R_OK) ? ((cs_hdr0 == "M" && cs_hdr1 == "C") ? C_FORMATTED : C_BLANK) : pad_card[1:0];
+						if (pp) pad_n2 <= 6'd60; else pad_n1 <= 6'd60;
 					end
 				end
 			endcase
