@@ -26,6 +26,7 @@ module screen
 	input      [31:0] pad_btn,
 	input      [63:0] pad_ana,      // RX RY LX LY
 	input       [3:0] pad_card,
+	input      [39:0] wdiag,        // wiring check: {pin 6 ID, pin 6 answered, pins low: pin 6, port 2, port 1}
 	input       [9:0] cur_sector,
 	input      [10:0] n_done,
 	input      [10:0] n_ok,
@@ -193,7 +194,15 @@ always @(*) begin
 				else blank = 1;
 			4: if (ncol < 15) msg = M_PD_MC; else begin mcol = 15;
 					msg = (s_card == 1) ? M_PD_MC_YES : (s_card == 2) ? M_PD_MC_BLANK : M_PD_MC_NO; end
-			default: if (nrow == 9) msg = M_P_PAD; else blank = 1;
+			default: if (nrow == 9) msg = M_P_PAD;
+				else if (nrow == 23) begin
+					msg = M_PD_WIRE;
+					if (ncol >= 2 + WX_P1 && ncol <= 4 + WX_P1) begin is_num = 1; num = wdiag[7:0];   npos = ncol - 6'(1 + WX_P1); end
+					if (ncol >= 2 + WX_P2 && ncol <= 4 + WX_P2) begin is_num = 1; num = wdiag[15:8];  npos = ncol - 6'(1 + WX_P2); end
+					if (ncol >= 2 + WX_P6 && ncol <= 4 + WX_P6) begin is_num = 1; num = wdiag[23:16]; npos = ncol - 6'(1 + WX_P6); end
+					if (ncol >= 2 + WX_ID && ncol <= 4 + WX_ID) begin is_num = 1; num = wdiag[24] ? wdiag[39:32] : 11'd0; npos = ncol - 6'(1 + WX_ID); end
+				end
+				else blank = 1;
 		endcase
 	end
 	if (ncol < mcol || nx[9]) blank = 1;
