@@ -33,7 +33,8 @@ The menu button and Launch Console Mode work as in any other core. Reset clears 
 Only SS1 Tool can start a write (job 3); the menu has no write option. SS1 Tool first backs the
 card up, builds the new image from that backup (for example with a save added), then asks for
 the write. The core compares every sector with the file and writes only those that differ, then
-reads each one back: it's marked blue on the map once it matches. A sector that won't take the
+reads each one back: it's marked blue on the map once it matches. SS1 Tool can also list sectors to write
+even when they already match (when you choose to overwrite a save that's already on the card). A sector that won't take the
 write is tried 6 times and then marked red; SS1 Tool still has the backup from just before.
 
 ## The screen
@@ -50,9 +51,9 @@ and a job file (drive 1). The job file asks for the job and gets the report back
 | Offset | Request (SS1 Tool) | Report (core) |
 |---|---|---|
 | 0 | `SMCQ` | `SMCP` while the job runs (every 0.25 s), `SMCR` when it's finished |
-| 4 | | version |
+| 4 | | version (2) |
 | 5 | job: 1 backup, 2 check, 3 write the file to the card | job |
-| 6 | | result: 1 OK, 2 OK with retries, 3 sectors failed, 4 no card, 5 differs, 6 file not 128 KB, 7 file read only, 8 saved with failed sectors, 9 card written |
+| 6 | flags: 1 = this backup is step 1 of a copy, 2 = this write is step 2 (shown on the TV) | result: 1 OK, 2 OK with retries, 3 sectors failed, 4 no card, 5 differs, 6 file not 128 KB, 7 file read only, 8 saved with failed sectors, 9 card written |
 | 7 | | card: 0 none, 1 formatted, 2 not formatted |
 | 8 | id (4 bytes) | same id |
 | 12 | | sectors OK, retried, failed, different, total retries, done (16-bit each) |
@@ -60,7 +61,7 @@ and a job file (drive 1). The job file asks for the job and gets the report back
 | 25 | | phase: 2 loading the file, 3 reading the card, 4 saving the file |
 | 26 | | sector being read (16-bit) |
 | 28 | | sectors written (16-bit) |
-| 512 | | one byte per sector: 1 OK, 2 retried, 3 failed, 4 different, 5 written and checked |
+| 512 | write: one byte per sector, non-zero = write it even if it already matches | one byte per sector: 1 OK, 2 retried, 3 failed, 4 different, 5 written and checked |
 
 The job file is 1536 bytes.
 

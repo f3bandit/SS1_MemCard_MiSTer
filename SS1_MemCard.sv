@@ -151,6 +151,7 @@ wire  [3:0] result;
 wire  [9:0] cur_sector;
 wire [10:0] n_done, n_ok, n_retried, n_failed, n_differ, n_written;
 wire        from_tool;
+wire  [1:0] step;
 wire  [9:0] map_vaddr;
 wire  [2:0] map_vdata;
 
@@ -192,6 +193,7 @@ mc_ctrl mc_ctrl
 	.n_differ(n_differ),
 	.n_written(n_written),
 	.req_from_tool(from_tool),
+	.step(step),
 	.map_vaddr(map_vaddr),
 	.map_vdata(map_vdata),
 
@@ -220,6 +222,7 @@ screen screen
 	.card_state(card_state),
 	.file_state(file_state),
 	.from_tool(from_tool),
+	.step(step),
 	.cur_sector(cur_sector),
 	.n_done(n_done),
 	.n_ok(n_ok),

@@ -11,7 +11,9 @@
 //   drive 0  the card file (raw 128 KB .mcd/.mcr/.sav image): written by a backup, read by a verify
 //   drive 1  the job file (optional, written by SS1 Tool): a request in, a report out
 //
-// Job file request (block 0): "SMCQ", job (1 backup, 2 verify, 3 write), 3 bytes 0, 4-byte id.
+// Job file request (block 0): "SMCQ", job (1 backup, 2 verify, 3 write), 0, flags, 0, 4-byte id.
+//   flags bit 0: this backup is step 1 of SS1 Tool's copy; bit 1: this write is step 2
+//   blocks 1-2: one byte per sector; non-zero = a write job writes that sector even if it matches
 // Job file report:            block 0  "SMCR", version, job, result, card state,
 //                                      id (4), ok, retried, failed, differ, retries (16-bit LE),
 //                                      sectors done (16-bit LE), speed
@@ -78,6 +80,7 @@ module mc_ctrl
 	output reg [10:0] n_differ,
 	output reg [10:0] n_written,
 	output reg        req_from_tool,
+	output reg  [1:0] step,         // SS1 Tool's copy: 1 the backup before writing, 2 the write
 	input       [9:0] map_vaddr,
 	output reg  [2:0] map_vdata,
 
@@ -104,7 +107,7 @@ localparam F_NONE = 0, F_OK = 1, F_BAD = 2;
 localparam MAP_NONE = 0, MAP_OK = 1, MAP_RETRY = 2, MAP_FAIL = 3, MAP_DIFFER = 4, MAP_WRITTEN = 5;
 
 localparam MAX_TRIES = 6;
-localparam VERSION   = 1;
+localparam VERSION   = 2;   // 2: request flags (step 1/2 of a copy) and forced sectors
 
 ////////////////////////////// card buffer (128 KB) //////////////////////////////
 
@@ -167,6 +170,9 @@ reg        req_valid;
 reg  [1:0] req_job;
 reg        jf_mounted;
 reg        req_rd;       // reading the request from the job file
+reg  [1:0] req_blk;      // which of its 3 blocks
+reg        jf_full;      // the job file has all 3 blocks
+reg [1023:0] force_wr;   // write job: sectors to write even when they already match
 reg        cf_new;       // a card file was just mounted
 reg        rep_final;    // the report is final ("SMCR"), not progress ("SMCP")
 reg  [1:0] pr_st;        // progress writer
@@ -279,6 +285,8 @@ always @(posedge clk) begin
 		map_addr   <= 0;
 		phase      <= P_CLEAR;
 		cf_new     <= 0;
+		step       <= 0;
+		req_blk    <= 0;
 		rep_final  <= 1;
 		pr_st      <= 0;
 		pr_tmr     <= 0;
@@ -292,10 +300,13 @@ always @(posedge clk) begin
 			jf_mounted <= (img_size != 0);
 			req_valid  <= 0;
 			if (img_size != 0 && phase == P_IDLE) begin
-				// read the request in block 0
-				sd_lba1 <= 0;
+				// read the request: block 0, then the forced-sector list in blocks 1-2
+				sd_lba1  <= 0;
 				sd_rd[1] <= 1;
 				req_rd   <= 1;
+				req_blk  <= 0;
+				jf_full  <= (img_size >= 1536);
+				force_wr <= 0;
 			end
 		end
 		if (img_mounted[0]) begin
@@ -309,9 +320,15 @@ always @(posedge clk) begin
 		end
 
 		// the request arrives
-		if (sd_ack[1] && sd_buff_wr && req_rd && sd_buff_addr < 16) req[sd_buff_addr[3:0]] <= sd_buff_dout;
+		if (sd_ack[1] && sd_buff_wr && req_rd && req_blk == 0 && sd_buff_addr < 16) req[sd_buff_addr[3:0]] <= sd_buff_dout;
+		if (sd_ack[1] && sd_buff_wr && req_rd && req_blk != 0) force_wr[{req_blk[1], sd_buff_addr}] <= (sd_buff_dout != 0);
 		if (sd_ack[1]) sd_rd[1] <= 0;
-		if (old_ack[1] && !sd_ack[1] && req_rd) begin
+		if (old_ack[1] && !sd_ack[1] && req_rd && jf_full && req_blk != 2) begin
+			req_blk  <= req_blk + 1'd1;
+			sd_lba1  <= req_blk + 1'd1;
+			sd_rd[1] <= 1;
+		end
+		else if (old_ack[1] && !sd_ack[1] && req_rd) begin
 			req_rd <= 0;
 			if (req[0] == "S" && req[1] == "M" && req[2] == "C" && req[3] == "Q" && (req[4] == J_BACKUP || req[4] == J_VERIFY || req[4] == J_WRITE)) begin
 				req_valid <= 1;
@@ -326,15 +343,17 @@ always @(posedge clk) begin
 				pend_job      <= req_job;
 				req_from_tool <= 1;
 				req_valid     <= 0;
+				step          <= req[6][1:0];
 			end
 			else if (opt_auto) begin
 				pend_job      <= J_BACKUP;
 				req_from_tool <= 0;
+				step          <= 0;
 			end
 		end
 
-		if (cmd_backup && phase == P_IDLE) begin pend_job <= J_BACKUP; req_from_tool <= 0; end
-		if (cmd_verify && phase == P_IDLE) begin pend_job <= J_VERIFY; req_from_tool <= 0; end
+		if (cmd_backup && phase == P_IDLE) begin pend_job <= J_BACKUP; req_from_tool <= 0; step <= 0; end
+		if (cmd_verify && phase == P_IDLE) begin pend_job <= J_VERIFY; req_from_tool <= 0; step <= 0; end
 
 		if (tmr) tmr <= tmr - 1'd1;
 		if (pr_tmr) pr_tmr <= pr_tmr - 1'd1;
@@ -440,8 +459,8 @@ always @(posedge clk) begin
 				1: if (cs_done) begin
 					tmr   <= 24'(GAP);
 					sd_st <= 0;
-					if (cs_result == R_OK && job == J_WRITE && cs_mismatch) begin
-						// this sector differs from the file: write it
+					if (cs_result == R_OK && job == J_WRITE && (cs_mismatch || force_wr[cur_sector])) begin
+						// this sector differs from the file (or SS1 Tool asked for it): write it
 						wtries <= 0;
 						sd_st  <= 2;
 					end

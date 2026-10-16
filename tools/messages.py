@@ -20,6 +20,8 @@ MSGS = [
     ("J_VERIFY",   "CHECK THE CARD AGAINST THE FILE"),
     ("J_WRITE",    "WRITE THE FILE TO THE CARD"),
     ("J_TOOL",     "    (SENT BY SS1 TOOL)"),
+    ("J_STEP1",    "STEP 1 OF 2: READING - NOTHING IS WRITTEN YET"),
+    ("J_STEP2",    "STEP 2 OF 2: WRITING THE CHANGES TO THE CARD"),
     ("P_IDLE",     "WAITING"),
     ("P_LOAD",     "LOADING THE FILE"),
     ("P_READ",     "READING SECTOR      / 1024"),

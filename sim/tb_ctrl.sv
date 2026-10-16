@@ -148,7 +148,7 @@ module tb;
 		.sd_buff_din0(sd_buff_din0), .sd_buff_din1(sd_buff_din1),
 		.phase(phase), .job(job), .result(result), .card_state(card_state), .file_state(file_state),
 		.cur_sector(cur_sector), .n_done(n_done), .n_ok(n_ok), .n_retried(n_retried),
-		.n_failed(n_failed), .n_differ(n_differ), .n_written(), .req_from_tool(),
+		.n_failed(n_failed), .n_differ(n_differ), .n_written(), .req_from_tool(), .step(),
 		.map_vaddr(10'd0), .map_vdata(),
 		.sio_sel_n(sel_n), .sio_clk(sclk), .sio_cmd(scmd), .sio_dat(dat), .sio_ack(ack_n)
 	);
@@ -255,6 +255,7 @@ module tb;
 
 		// 2. verify against the file, with one byte changed
 		file0[5000] = file0[5000] ^ 8'h01;
+		for (i = 0; i < 1536; i = i + 1) file1[i] = 0;
 		file1[0] = "S"; file1[1] = "M"; file1[2] = "C"; file1[3] = "Q"; file1[4] = 2;
 		mount(1, 1536);
 		repeat (20000) @(posedge clk);
@@ -292,6 +293,7 @@ module tb;
 		for (i = 0; i < 131072; i = i + 1) file0[i] = card.mem[i];
 		for (i = 0; i < 128; i = i + 1) begin file0[128*10 + i] = i; file0[128*700 + i] = ~i; file0[128*1023 + i] = 8'h5A; end
 		card.writes = 0; card.bad_write_sector = 700; card.bad_write_count = 1;
+		for (i = 0; i < 1536; i = i + 1) file1[i] = 0;   // a fresh job file, like SS1 Tool writes
 		file1[0] = "S"; file1[1] = "M"; file1[2] = "C"; file1[3] = "Q"; file1[4] = 3;
 		mount(1, 1536);
 		repeat (20000) @(posedge clk);
@@ -303,6 +305,33 @@ module tb;
 		check("write: only 3 sectors written", card.writes == 3 && dut.n_written == 3 && n_ok == 1021 && n_failed == 0);
 		check("write: result and report", result == 9 && file1[3] == "R" && file1[5] == 3 && file1[6] == 9 && file1[28] == 3 && file1[512 + 700] == 5);
 		check("write: card file left alone", file0[128*10 + 5] == 5);
+
+		// 8. Yes on a save that's already on the card: SS1 Tool forces its sectors, which match,
+		//    to be written anyway (block 1's 64 sectors and its directory frame, sector 1)
+		for (i = 0; i < 131072; i = i + 1) file0[i] = card.mem[i];
+		for (i = 0; i < 1536; i = i + 1) file1[i] = 0;
+		file1[0] = "S"; file1[1] = "M"; file1[2] = "C"; file1[3] = "Q"; file1[4] = 3; file1[6] = 2;
+		file1[512 + 1] = 1;
+		for (i = 64; i < 128; i = i + 1) file1[512 + i] = 1;
+		card.writes = 0; card.bad_write_sector = -1;
+		mount(1, 1536);
+		repeat (20000) @(posedge clk);
+		mount(0, 131072);
+		wait (phase == 3);
+		check("step 2 shown", dut.step == 2);
+		wait_done();
+		check("forced: identical sectors written anyway", card.writes == 65 && dut.n_written == 65 && result == 9 && file1[512 + 64] == 5 && file1[512 + 2] == 1);
+		check("report says version 2", file1[4] == 2);
+
+		// 9. the next request without forced sectors writes nothing that matches
+		file1[0] = "S"; file1[1] = "M"; file1[2] = "C"; file1[3] = "Q"; file1[4] = 3; file1[6] = 0;
+		for (i = 512; i < 1536; i = i + 1) file1[i] = 0;
+		card.writes = 0;
+		mount(1, 1536);
+		repeat (20000) @(posedge clk);
+		mount(0, 131072);
+		wait_done();
+		check("forced list cleared by the next request", card.writes == 0 && dut.n_written == 0 && dut.step == 0);
 
 		// 6. wrong file size
 		mount(0, 1000);
