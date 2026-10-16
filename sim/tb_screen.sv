@@ -8,10 +8,10 @@ module tb_screen;
 	reg  [2:0] map_data;
 	always @(posedge clk) map_data <= map[map_addr];
 	wire ce, hb, vb, hs, vs; wire [7:0] r, g, b;
-	reg [2:0] phase; reg [1:0] job, cs, fs; reg [3:0] result; reg tool;
+	reg [2:0] phase, job; reg [1:0] cs, fs; reg [3:0] result; reg tool;
 	reg [9:0] cur; reg [10:0] nd, nok, nre, nfa, ndi, nwr;
 	screen dut(.clk(clk), .reset(1'b0), .phase(phase), .job(job), .result(result), .card_state(cs),
-		.file_state(fs), .from_tool(tool), .step(2'd0), .cur_sector(cur), .n_done(nd), .n_ok(nok), .n_retried(nre),
+		.file_state(fs), .from_tool(tool), .step(2'd0), .port2(1'b0), .pad_on(1'b0), .pad_id(8'd0), .pad_btn(16'd0), .pad_ana(32'd0), .cur_sector(cur), .n_done(nd), .n_ok(nok), .n_retried(nre),
 		.n_failed(nfa), .n_differ(ndi), .n_written(nwr), .map_addr(map_addr), .map_data(map_data),
 		.ce_pix(ce), .hblank(hb), .vblank(vb), .hsync(hs), .vsync(vs), .r(r), .g(g), .b(b));
 	integer f, i, x, y, scene;
