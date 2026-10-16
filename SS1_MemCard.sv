@@ -3,7 +3,7 @@
 //  SS1 Memory Card Tool
 //  Copyright (C) 2026 f3bandit
 //
-//  Backs up a PlayStation memory card in the SuperStation One's front port 1 (SNAC) to a
+//  Backs up a PlayStation memory card in the SuperStation One's front port 1 or 2 (SNAC) to a
 //  file, checks a card against a file, and (asked by SS1 Tool) writes a file back to the card:
 //  only the sectors that differ, each one read back to check it.
 //
@@ -127,10 +127,12 @@ wire cmd_verify = status[2] & ~old_st[2];
 
 /////////////////////// front port 1 (SNAC) ///////////////////////
 // USER_OUT[1] select port 1, [0] select port 2, [2] CMD, [5] CLK; USER_IN[4] DAT, [3] ACK.
+// A job uses one port (port 2 when SS1 Tool's job file asks for it); the other stays deselected.
 // A pin set to 1 floats, so DAT and ACK can be read from the card.
 
 wire sio_sel_n, sio_clk, sio_cmd;
-assign USER_OUT = {1'b1, sio_clk, 1'b1, 1'b1, sio_cmd, sio_sel_n, 1'b1};
+wire port2;   // the job's front port: 0 port 1, 1 port 2
+assign USER_OUT = {1'b1, sio_clk, 1'b1, 1'b1, sio_cmd, port2 ? 1'b1 : sio_sel_n, port2 ? sio_sel_n : 1'b1};
 
 reg [2:0] dat_s = 3'b111;
 reg [3:0] ack_s = 4'b1111;
@@ -146,12 +148,17 @@ end
 /////////////////////// the tool ///////////////////////
 
 wire  [2:0] phase;
-wire  [1:0] job, card_state, file_state;
+wire  [2:0] job;
+wire  [1:0] card_state, file_state;
 wire  [3:0] result;
 wire  [9:0] cur_sector;
 wire [10:0] n_done, n_ok, n_retried, n_failed, n_differ, n_written;
 wire        from_tool;
 wire  [1:0] step;
+wire        pad_on;
+wire  [7:0] pad_id;
+wire [15:0] pad_btn;
+wire [31:0] pad_ana;
 wire  [9:0] map_vaddr;
 wire  [2:0] map_vdata;
 
@@ -194,6 +201,11 @@ mc_ctrl mc_ctrl
 	.n_written(n_written),
 	.req_from_tool(from_tool),
 	.step(step),
+	.port2(port2),
+	.pad_on(pad_on),
+	.pad_id(pad_id),
+	.pad_btn(pad_btn),
+	.pad_ana(pad_ana),
 	.map_vaddr(map_vaddr),
 	.map_vdata(map_vdata),
 
@@ -223,6 +235,11 @@ screen screen
 	.file_state(file_state),
 	.from_tool(from_tool),
 	.step(step),
+	.port2(port2),
+	.pad_on(pad_on),
+	.pad_id(pad_id),
+	.pad_btn(pad_btn),
+	.pad_ana(pad_ana),
 	.cur_sector(cur_sector),
 	.n_done(n_done),
 	.n_ok(n_ok),

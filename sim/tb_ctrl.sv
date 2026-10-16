@@ -24,6 +24,10 @@ module card_model
 	reg  [7:0] chk;
 	reg        active;
 	reg        wmode;
+	reg        pmode;               // a controller is being read
+	integer    pad_present = 1;
+	reg [15:0] pad_raw = 16'hFFFF;    // active low
+	reg [31:0] pad_ana = 32'h80808080;
 	reg  [7:0] wbuf[0:127];
 	reg  [7:0] wchk;
 	integer    writes = 0;
@@ -32,7 +36,7 @@ module card_model
 
 	initial begin dat = 1; ack_n = 1; active = 0; wmode = 0; end
 
-	always @(negedge sel_n) begin idx = 0; bitn = 0; active = present; out_sh = 8'hFF; wmode = 0; end
+	always @(negedge sel_n) begin idx = 0; bitn = 0; active = present | pad_present; out_sh = 8'hFF; wmode = 0; pmode = 0; end
 	always @(posedge sel_n) begin active = 0; dat = 1; end
 
 	// card drives DAT while CLK is low, the console samples on the rising edge
@@ -50,7 +54,16 @@ module card_model
 	function [7:0] reply(input integer i);
 		integer d;
 		begin
-			if (wmode && i >= 3) begin
+			if (pmode) begin
+				case (i)
+					0: reply = 8'h73;
+					1: reply = 8'h5A;
+					2: reply = pad_raw[7:0];
+					3: reply = pad_raw[15:8];
+					default: reply = pad_ana[(i - 4) * 8 +: 8];
+				endcase
+			end
+			else if (wmode && i >= 3) begin
 				if (i == 134) reply = 8'h5C;
 				else if (i == 135) reply = 8'h5D;
 				else if (i == 136) reply = (wchk == 0) ? 8'h47 : 8'h4E;
@@ -79,8 +92,10 @@ module card_model
 		integer i;
 		begin
 			// in_sh is the byte just received (index idx); out byte for idx+1 is prepared now
-			if (idx == 0 && in_sh != 8'h81) begin active = 0; disable respond; end
-			if (idx == 1) begin
+			if (idx == 0 && in_sh == 8'h01 && pad_present) pmode = 1;
+			else if (idx == 0 && (in_sh != 8'h81 || !present)) begin active = 0; disable respond; end
+			if (idx == 1 && pmode) ;
+			else if (idx == 1) begin
 				if (in_sh == 8'h52) wmode = 0;
 				else if (in_sh == 8'h57) wmode = 1;
 				else begin active = 0; disable respond; end
@@ -103,7 +118,7 @@ module card_model
 			end
 			out_sh = reply(idx);
 			idx = idx + 1;
-			if (idx < (wmode ? 138 : 140)) begin
+			if (idx < (pmode ? 9 : wmode ? 138 : 140)) begin
 				#(ack_delay) ack_n = 0;
 				#200 ack_n = 1;
 			end
@@ -130,14 +145,15 @@ module tb;
 	reg         sd_buff_wr = 0;
 	wire  [7:0] sd_buff_din0, sd_buff_din1;
 	wire  [2:0] phase;
-	wire  [1:0] job, card_state, file_state;
+	wire  [2:0] job;
+	wire  [1:0] card_state, file_state;
 	wire  [3:0] result;
 	wire  [9:0] cur_sector;
 	wire [10:0] n_done, n_ok, n_retried, n_failed, n_differ;
 
 	wire sel_n, sclk, scmd, dat, ack_n;
 
-	mc_ctrl #(.HALF_FAST(3), .HALF_SLOW(6), .ACK_TO(60), .SEL_DLY(4), .GAP(10), .RETRY_WAIT(20), .POLL(2000), .PROGRESS(50000)) dut
+	mc_ctrl #(.HALF_FAST(3), .HALF_SLOW(6), .ACK_TO(60), .SEL_DLY(4), .GAP(10), .RETRY_WAIT(20), .POLL(2000), .PROGRESS(50000), .PAD_GAP(2000)) dut
 	(
 		.clk(clk), .reset(reset),
 		.cmd_backup(cmd_backup), .cmd_verify(cmd_verify),
@@ -148,7 +164,7 @@ module tb;
 		.sd_buff_din0(sd_buff_din0), .sd_buff_din1(sd_buff_din1),
 		.phase(phase), .job(job), .result(result), .card_state(card_state), .file_state(file_state),
 		.cur_sector(cur_sector), .n_done(n_done), .n_ok(n_ok), .n_retried(n_retried),
-		.n_failed(n_failed), .n_differ(n_differ), .n_written(), .req_from_tool(), .step(),
+		.n_failed(n_failed), .n_differ(n_differ), .n_written(), .req_from_tool(), .step(), .port2(), .pad_on(), .pad_id(), .pad_btn(), .pad_ana(),
 		.map_vaddr(10'd0), .map_vdata(),
 		.sio_sel_n(sel_n), .sio_clk(sclk), .sio_cmd(scmd), .sio_dat(dat), .sio_ack(ack_n)
 	);
@@ -321,7 +337,7 @@ module tb;
 		check("step 2 shown", dut.step == 2);
 		wait_done();
 		check("forced: identical sectors written anyway", card.writes == 65 && dut.n_written == 65 && result == 9 && file1[512 + 64] == 5 && file1[512 + 2] == 1);
-		check("report says version 2", file1[4] == 2);
+		check("report says version 3", file1[4] == 3);
 
 		// 9. the next request without forced sectors writes nothing that matches
 		file1[0] = "S"; file1[1] = "M"; file1[2] = "C"; file1[3] = "Q"; file1[4] = 3; file1[6] = 0;
@@ -332,6 +348,31 @@ module tb;
 		mount(0, 131072);
 		wait_done();
 		check("forced list cleared by the next request", card.writes == 0 && dut.n_written == 0 && dut.step == 0);
+
+		// 10. controller test on front port 2: buttons and sticks reach the report; a new job ends it
+		for (i = 0; i < 1536; i = i + 1) file1[i] = 0;
+		file1[0] = "S"; file1[1] = "M"; file1[2] = "C"; file1[3] = "Q"; file1[4] = 4; file1[7] = 2;
+		card.pad_raw = ~16'h4011;      // Cross, Up and Select held
+		card.pad_ana = 32'h10203040;   // RX 40 RY 30 LX 20 LY 10
+		mount(1, 1536);
+		repeat (20000) @(posedge clk);
+		mount(0, 131072);
+		wait (phase == 7);
+		repeat (400000) @(posedge clk);
+		check("controller test on port 2", dut.port2 == 1 && dut.pad_on && dut.pad_id == 8'h73 && dut.pad_btn == 16'h4011 && dut.pad_ana == 32'h10203040);
+		check("controller in the report", file1[3] == "P" && file1[5] == 4 && file1[32] == 2 && file1[33] == 1 && file1[34] == 8'h73 && file1[35] == 8'h11 && file1[36] == 8'h40 && file1[37] == 8'h40 && file1[40] == 8'h10);
+		check("memory card seen in that port", card_state == 1);
+		card.pad_present = 0;
+		repeat (400000) @(posedge clk);
+		check("controller unplugged", !dut.pad_on && dut.pad_btn == 0 && file1[33] == 0);
+		card.pad_present = 1;
+		for (i = 0; i < 1536; i = i + 1) file1[i] = 0;
+		file1[0] = "S"; file1[1] = "M"; file1[2] = "C"; file1[3] = "Q"; file1[4] = 1;
+		mount(1, 1536);
+		repeat (20000) @(posedge clk);
+		mount(0, 131072);
+		wait_done();
+		check("a new job ends the test, back on port 1", dut.port2 == 0 && result == 1 && file1[5] == 1);
 
 		// 6. wrong file size
 		mount(0, 1000);

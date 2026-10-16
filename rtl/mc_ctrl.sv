@@ -38,7 +38,8 @@ module mc_ctrl
 	parameter RETRY_WAIT = 20000,    // 1 ms before a retry (10 ms on the slow bus)
 	parameter POLL       = 6000000,  // look for a card every 0.3 s
 	parameter PROGRESS   = 5000000,  // progress into the job file every 0.25 s
-	parameter WRITE_GAP  = 100000    // 5 ms after writing a sector before reading it back
+	parameter WRITE_GAP  = 100000,   // 5 ms after writing a sector before reading it back
+	parameter PAD_GAP    = 330000    // controller test: a read every ~16 ms
 )
 (
 	input             clk,
@@ -68,7 +69,7 @@ module mc_ctrl
 
 	// for the screen
 	output reg  [2:0] phase,
-	output reg  [1:0] job,
+	output reg  [2:0] job,
 	output reg  [3:0] result,
 	output reg  [1:0] card_state,
 	output reg  [1:0] file_state,
@@ -81,6 +82,12 @@ module mc_ctrl
 	output reg [10:0] n_written,
 	output reg        req_from_tool,
 	output reg  [1:0] step,         // SS1 Tool's copy: 1 the backup before writing, 2 the write
+	output reg        port2,        // the front port used: 0 port 1, 1 port 2
+	output reg        pad_on,       // controller test: a controller answers
+	output reg  [7:0] pad_id,
+	output reg [15:0] pad_btn,      // pressed = 1: 0 Select 1 L3 2 R3 3 Start 4 Up 5 Right 6 Down 7 Left
+	                                //              8 L2 9 R2 10 L1 11 R1 12 Triangle 13 Circle 14 Cross 15 Square
+	output reg [31:0] pad_ana,      // RX RY LX LY
 	input       [9:0] map_vaddr,
 	output reg  [2:0] map_vdata,
 
@@ -93,9 +100,9 @@ module mc_ctrl
 );
 
 // phases
-localparam P_IDLE = 0, P_CLEAR = 1, P_LOAD = 2, P_READ = 3, P_SAVE = 4, P_REPORT = 5, P_DONE = 6;
+localparam P_IDLE = 0, P_CLEAR = 1, P_LOAD = 2, P_READ = 3, P_SAVE = 4, P_REPORT = 5, P_DONE = 6, P_PAD = 7;
 // jobs
-localparam J_NONE = 0, J_BACKUP = 1, J_VERIFY = 2, J_WRITE = 3;
+localparam J_NONE = 0, J_BACKUP = 1, J_VERIFY = 2, J_WRITE = 3, J_PAD = 4;
 // results
 localparam RS_NONE = 0, RS_OK = 1, RS_OK_RETRY = 2, RS_FAILED = 3, RS_NOCARD = 4, RS_DIFFER = 5,
            RS_BADFILE = 6, RS_READONLY = 7, RS_SAVED_BAD = 8, RS_WRITTEN = 9;
@@ -107,7 +114,7 @@ localparam F_NONE = 0, F_OK = 1, F_BAD = 2;
 localparam MAP_NONE = 0, MAP_OK = 1, MAP_RETRY = 2, MAP_FAIL = 3, MAP_DIFFER = 4, MAP_WRITTEN = 5;
 
 localparam MAX_TRIES = 6;
-localparam VERSION   = 2;   // 2: request flags (step 1/2 of a copy) and forced sectors
+localparam VERSION   = 3;   // 2: request flags (step 1/2 of a copy) and forced sectors; 3: front port 2, controller test
 
 ////////////////////////////// card buffer (128 KB) //////////////////////////////
 
@@ -147,13 +154,19 @@ wire [16:0] cs_addr;
 wire  [7:0] cs_wdata;
 wire        cs_we;
 
+reg         cs_pad;    // in the controller test: read the controller (else the card)
+wire  [7:0] cs_pid;
+wire [15:0] cs_pbtn;
+wire [31:0] cs_pana;
+
 card_sector card_sector
 (
 	.clk(clk), .reset(reset),
 	.half_period(opt_slow ? 16'(HALF_SLOW) : 16'(HALF_FAST)),
 	.ack_timeout(16'(ACK_TO)),
 	.sel_delay(16'(SEL_DLY)),
-	.start(cs_start), .sector(cs_sector), .mode(cs_mode),
+	.start(cs_start), .pad(cs_pad && phase == P_PAD), .sector(cs_sector), .mode(cs_mode),
+	.pad_id(cs_pid), .pad_btn(cs_pbtn), .pad_ana(cs_pana),
 	.busy(), .done(cs_done), .result(cs_result), .mismatch(cs_mismatch),
 	.hdr0(cs_hdr0), .hdr1(cs_hdr1),
 	.mem_addr(cs_addr), .mem_wdata(cs_wdata), .mem_we(cs_we), .mem_rdata(m_q),
@@ -167,10 +180,13 @@ localparam R_OK = 0, R_NOCARD = 1, R_BAD = 2, R_RANGE = 3;
 
 reg  [7:0] req[0:15];
 reg        req_valid;
-reg  [1:0] req_job;
+reg  [2:0] req_job;
 reg        jf_mounted;
 reg        req_rd;       // reading the request from the job file
 reg  [1:0] req_blk;      // which of its 3 blocks
+reg        req_port2;    // the request is for front port 2
+reg  [7:0] pad_cnt;      // controller test: reads so far
+reg  [5:0] pad_n;        // reads until the next look for a memory card
 reg        jf_full;      // the job file has all 3 blocks
 reg [1023:0] force_wr;   // write job: sectors to write even when they already match
 reg        cf_new;       // a card file was just mounted
@@ -203,6 +219,12 @@ always @(*) begin
 		28: rep0 = n_written[7:0]; 29: rep0 = n_written[10:8];
 		25: rep0 = phase;
 		26: rep0 = cur_sector[7:0]; 27: rep0 = cur_sector[9:8];
+		32: rep0 = port2 ? 8'd2 : 8'd1;
+		33: rep0 = pad_on;
+		34: rep0 = pad_id;
+		35: rep0 = pad_btn[7:0];  36: rep0 = pad_btn[15:8];
+		37: rep0 = pad_ana[7:0];  38: rep0 = pad_ana[15:8];  39: rep0 = pad_ana[23:16];  40: rep0 = pad_ana[31:24];
+		41: rep0 = pad_cnt;
 		default: rep0 = 0;
 	endcase
 end
@@ -250,7 +272,7 @@ reg [23:0] tmr;
 reg  [2:0] tries;
 reg  [2:0] wtries;
 reg        any_retry;
-reg  [1:0] pend_job;     // job waiting for a card or a file
+reg  [2:0] pend_job;     // job waiting for a card or a file
 reg  [1:0] old_ack;
 reg  [2:0] nocard_run;   // sectors in a row with no card answering
 
@@ -286,6 +308,10 @@ always @(posedge clk) begin
 		phase      <= P_CLEAR;
 		cf_new     <= 0;
 		step       <= 0;
+		port2      <= 0;
+		pad_on     <= 0;
+		pad_cnt    <= 0;
+		req_port2  <= 0;
 		req_blk    <= 0;
 		rep_final  <= 1;
 		pr_st      <= 0;
@@ -299,7 +325,8 @@ always @(posedge clk) begin
 		if (img_mounted[1]) begin
 			jf_mounted <= (img_size != 0);
 			req_valid  <= 0;
-			if (img_size != 0 && phase == P_IDLE) begin
+			if (img_size != 0 && phase == P_PAD) phase <= P_IDLE;   // a new job ends the controller test
+			if (img_size != 0 && (phase == P_IDLE || phase == P_PAD)) begin
 				// read the request: block 0, then the forced-sector list in blocks 1-2
 				sd_lba1  <= 0;
 				sd_rd[1] <= 1;
@@ -330,9 +357,10 @@ always @(posedge clk) begin
 		end
 		else if (old_ack[1] && !sd_ack[1] && req_rd) begin
 			req_rd <= 0;
-			if (req[0] == "S" && req[1] == "M" && req[2] == "C" && req[3] == "Q" && (req[4] == J_BACKUP || req[4] == J_VERIFY || req[4] == J_WRITE)) begin
+			if (req[0] == "S" && req[1] == "M" && req[2] == "C" && req[3] == "Q" && (req[4] == J_BACKUP || req[4] == J_VERIFY || req[4] == J_WRITE || req[4] == J_PAD)) begin
 				req_valid <= 1;
-				req_job   <= req[4][1:0];
+				req_job   <= req[4][2:0];
+				req_port2 <= (req[7] == 2);
 			end
 		end
 
@@ -341,19 +369,21 @@ always @(posedge clk) begin
 			cf_new <= 0;
 			if (req_valid) begin
 				pend_job      <= req_job;
+				port2         <= req_port2;
 				req_from_tool <= 1;
 				req_valid     <= 0;
 				step          <= req[6][1:0];
 			end
 			else if (opt_auto) begin
 				pend_job      <= J_BACKUP;
+				port2         <= 0;
 				req_from_tool <= 0;
 				step          <= 0;
 			end
 		end
 
-		if (cmd_backup && phase == P_IDLE) begin pend_job <= J_BACKUP; req_from_tool <= 0; step <= 0; end
-		if (cmd_verify && phase == P_IDLE) begin pend_job <= J_VERIFY; req_from_tool <= 0; step <= 0; end
+		if (cmd_backup && phase == P_IDLE) begin pend_job <= J_BACKUP; req_from_tool <= 0; step <= 0; port2 <= 0; end
+		if (cmd_verify && phase == P_IDLE) begin pend_job <= J_VERIFY; req_from_tool <= 0; step <= 0; port2 <= 0; end
 
 		if (tmr) tmr <= tmr - 1'd1;
 		if (pr_tmr) pr_tmr <= pr_tmr - 1'd1;
@@ -361,14 +391,15 @@ always @(posedge clk) begin
 		// progress for SS1 Tool: while a job runs, the job file gets the counts and the
 		// sector map (as "SMCP") every quarter second; the final report says "SMCR"
 		case (pr_st)
-			0: if (jf_mounted && !pr_tmr && (phase == P_LOAD || phase == P_READ || phase == P_SAVE)) begin
+			0: if (jf_mounted && !pr_tmr && (phase == P_LOAD || phase == P_READ || phase == P_SAVE || phase == P_PAD)) begin
 				pr_blk <= 0;
 				pr_st  <= 1;
 			end
 			1: begin rep_blk_sel <= pr_blk; sd_lba1 <= pr_blk; sd_wr[1] <= 1; pr_st <= 2; end
 			2: if (sd_ack[1]) begin sd_wr[1] <= 0; pr_st <= 3; end
 			3: if (!sd_ack[1]) begin
-				if (pr_blk == 2) begin pr_st <= 0; pr_tmr <= 24'(PROGRESS); end
+				if (phase == P_PAD) begin pr_st <= 0; pr_tmr <= 24'(PROGRESS / 3); end   // controller test: block 0, ~12 a second
+				else if (pr_blk == 2) begin pr_st <= 0; pr_tmr <= 24'(PROGRESS); end
 				else begin pr_blk <= pr_blk + 1'd1; pr_st <= 1; end
 			end
 		endcase
@@ -380,7 +411,7 @@ always @(posedge clk) begin
 					result   <= (file_state == F_BAD) ? RS_BADFILE : RS_NONE;
 					pend_job <= J_NONE;
 				end
-				else if (pend_job != J_NONE && card_state != C_NONE && !sd_rd[1] && sd_st == 0) begin
+				else if (pend_job != J_NONE && (card_state != C_NONE || pend_job == J_PAD) && !sd_rd[1] && sd_st == 0) begin
 					if (pend_job == J_BACKUP && cf_readonly) begin
 						job      <= J_BACKUP;
 						result   <= RS_READONLY;
@@ -433,7 +464,7 @@ always @(posedge clk) begin
 				if (map_addr == 1023) begin
 					blk   <= 0;
 					sd_st <= 0;
-					phase <= (job == J_VERIFY || job == J_WRITE) ? P_LOAD : (job == J_BACKUP) ? P_READ : P_IDLE;
+					phase <= (job == J_VERIFY || job == J_WRITE) ? P_LOAD : (job == J_BACKUP) ? P_READ : (job == J_PAD) ? P_PAD : P_IDLE;
 					tries <= 0;
 				end
 			end
@@ -556,6 +587,38 @@ always @(posedge clk) begin
 			end
 
 			// shows the result until the next job; keeps watching the card
+			// controller test: read the controller about 60 times a second, and look for a memory
+			// card in the same port once a second. It runs until a new job file or a reset.
+			P_PAD: case (sd_st)
+				0: if (!tmr) begin
+					cs_pad    <= (pad_n != 0);
+					cs_sector <= 0;
+					cs_mode   <= CS_PROBE;
+					cs_start  <= 1;
+					sd_st     <= 1;
+				end
+				1: if (cs_done) begin
+					sd_st <= 0;
+					tmr   <= 24'(PAD_GAP);
+					if (cs_pad) begin
+						pad_on  <= (cs_result == R_OK);
+						pad_cnt <= pad_cnt + 1'd1;
+						if (cs_result == R_OK) begin
+							pad_id  <= cs_pid;
+							pad_btn <= ~cs_pbtn;
+							pad_ana <= (cs_pid[3:0] >= 3) ? cs_pana : 32'h80808080;
+						end
+						else pad_btn <= 0;
+						pad_n <= pad_n - 1'd1;
+					end
+					else begin
+						if (cs_result == R_NOCARD) card_state <= C_NONE;
+						else if (cs_result == R_OK) card_state <= (cs_hdr0 == "M" && cs_hdr1 == "C") ? C_FORMATTED : C_BLANK;
+						pad_n <= 6'd60;
+					end
+				end
+			endcase
+
 			P_DONE: begin
 				phase <= P_IDLE;
 				tmr   <= 24'(POLL);

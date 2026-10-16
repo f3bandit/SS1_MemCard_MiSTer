@@ -14,12 +14,17 @@ module screen
 	input             reset,
 
 	input       [2:0] phase,
-	input       [1:0] job,
+	input       [2:0] job,
 	input       [3:0] result,
 	input       [1:0] card_state,
 	input       [1:0] file_state,
 	input             from_tool,
 	input       [1:0] step,         // SS1 Tool's copy: 1 the backup first, 2 the write
+	input             port2,        // the front port used (0 port 1, 1 port 2)
+	input             pad_on,       // controller test
+	input       [7:0] pad_id,
+	input      [15:0] pad_btn,
+	input      [31:0] pad_ana,
 	input       [9:0] cur_sector,
 	input      [10:0] n_done,
 	input      [10:0] n_ok,
@@ -42,7 +47,9 @@ module screen
 
 `include "messages.vh"
 
-localparam P_IDLE = 0, P_CLEAR = 1, P_LOAD = 2, P_READ = 3, P_SAVE = 4, P_REPORT = 5, P_DONE = 6;
+localparam P_IDLE = 0, P_CLEAR = 1, P_LOAD = 2, P_READ = 3, P_SAVE = 4, P_REPORT = 5, P_DONE = 6, P_PAD = 7;
+
+`include "padcols.vh"
 
 ////////////////////////////// timing (same as MiSTer's template core) //////////////////////////////
 
@@ -72,7 +79,7 @@ end
 
 ////////////////////////////// text //////////////////////////////
 
-reg [5:0] msgs[0:4095];
+reg [5:0] msgs[0:8191];
 initial $readmemh("rtl/messages.hex", msgs);
 
 function [5:0] digit(input [10:0] v, input [1:0] pos);   // pos 0 = thousands
@@ -93,7 +100,7 @@ wire [9:0] nx = hc + 1'd1 - 10'd8;   // 8 pixels of border on the left
 wire [5:0] ncol = nx[8:3];
 wire [4:0] nrow = vc[7:3];
 
-reg  [5:0] msg;       // message on this row
+reg  [6:0] msg;       // message on this row
 reg  [5:0] mcol;      // column where it starts
 reg        is_num;
 reg [10:0] num;
@@ -101,7 +108,8 @@ reg  [1:0] npos;
 reg        blank;
 
 wire [10:0] sector_no = cur_sector + 1'd1;
-wire        busy = (phase != P_IDLE && phase != P_DONE);
+wire        busy = (phase != P_IDLE && phase != P_DONE && phase != P_PAD);
+wire        padt = (phase == P_PAD);
 
 always @(*) begin
 	msg = M_R_NONE; mcol = 2; is_num = 0; num = 0; npos = 0; blank = 0;
@@ -114,7 +122,7 @@ always @(*) begin
 				msg = (file_state == 1) ? M_F_OK : (file_state == 2) ? M_F_BAD : M_F_NONE; end
 		6:  if (ncol < 9) msg = M_JOB; else begin mcol = 9;
 				msg = (step == 1 && job == 1) ? M_J_STEP1 : (step == 2 && job == 3) ? M_J_STEP2 :
-				      (job == 1) ? M_J_BACKUP : (job == 2) ? M_J_VERIFY : (job == 3) ? M_J_WRITE : M_J_NONE; end
+				      (job == 1) ? M_J_BACKUP : (job == 2) ? M_J_VERIFY : (job == 3) ? M_J_WRITE : (job == 4) ? M_J_PAD : M_J_NONE; end
 		7:  if (from_tool && job != 0) begin mcol = 9; msg = M_J_TOOL; end
 		9:  case (phase)
 				P_LOAD:   msg = M_P_LOAD;
@@ -155,6 +163,28 @@ always @(*) begin
 		29: msg = busy ? M_H_BUSY : M_H_IDLE;
 		default: blank = 1;
 	endcase
+
+	// the controller test has its own lines in place of the map, its legend and the counts
+	if (padt && nrow >= 9 && nrow <= 23) begin
+		msg = M_R_NONE; mcol = 2; is_num = 0; num = 0; npos = 0; blank = 0;
+		case (nrow)
+			9:  begin msg = M_P_PAD; if (ncol == 31) begin is_num = 1; num = port2 ? 11'd2 : 11'd1; npos = 3; end end
+			11: if (ncol < 15) msg = M_PD_CTRL; else begin mcol = 15;
+					msg = !pad_on ? M_PD_NONE : (pad_id[7:4] == 4) ? M_PD_DIG : (pad_id[7:4] == 7) ? M_PD_DS : (pad_id[7:4] == 5) ? M_PD_ANA :
+					      (pad_id[7:4] == 2) ? M_PD_NEG : (pad_id[7:4] == 1) ? M_PD_MOUSE : (pad_id[7:4] == 6) ? M_PD_GUN : M_PD_OTHER; end
+			13: msg = M_PD_B1;
+			14: msg = M_PD_B2;
+			16, 17: begin
+					msg = (nrow == 16) ? M_PD_LS : M_PD_RS;
+					if (ncol >= 18 && ncol <= 20) begin is_num = 1; num = (nrow == 16) ? pad_ana[23:16] : pad_ana[7:0];  npos = ncol - 6'd17; end
+					if (ncol >= 27 && ncol <= 29) begin is_num = 1; num = (nrow == 16) ? pad_ana[31:24] : pad_ana[15:8]; npos = ncol - 6'd26; end
+				end
+			19: if (ncol < 28) msg = M_PD_MC; else begin mcol = 28;
+					msg = (card_state == 1) ? M_PD_MC_YES : (card_state == 2) ? M_PD_MC_BLANK : M_PD_MC_NO; end
+			default: blank = 1;
+		endcase
+		if (!pad_on && (nrow == 13 || nrow == 14 || nrow == 16 || nrow == 17)) blank = 1;
+	end
 	if (ncol < mcol || nx[9]) blank = 1;
 end
 
@@ -182,18 +212,19 @@ font font(.ch(ch), .row(vc[2:0]), .q(font_q));
 wire [9:0] x = hc - 10'd8;
 wire [4:0] row = vc[7:3];
 wire       pix = font_q[~x[2:0]];
+wire [4:0] pbit = btn_bit(row == 14, x[8:3] - 6'd2);   // controller test: the button under this pixel
 
-wire in_map  = (hc >= 16) && (hc < 16 + 256) && (vc >= 96) && (vc < 96 + 128);
+wire in_map  = !padt && (hc >= 16) && (hc < 16 + 256) && (vc >= 96) && (vc < 96 + 128);
 wire cell_in = (hc - 10'd16) % 8 != 7 && (vc - 10'd96) % 4 != 3;
 wire [9:0] ny_cur = vc - 10'd96;
 wire [9:0] hx_cur = hc - 10'd16;
 wire [9:0] cellno = {ny_cur[6:2], hx_cur[7:3]};
 
-wire in_bar   = (vc >= 82) && (vc < 86) && (hc >= 16) && (hc < 16 + 256);
+wire in_bar   = !padt && (vc >= 82) && (vc < 86) && (hc >= 16) && (hc < 16 + 256);
 wire bar_fill = (hc - 10'd16) < n_done[10:2];
 
 // legend squares at column 36, rows 12-16
-wire in_leg = (x[9:3] == 36) && (row >= 12) && (row <= 17) && (vc[2:0] >= 1) && (vc[2:0] <= 6) && (x[2:0] >= 1) && (x[2:0] <= 6);
+wire in_leg = !padt && (x[9:3] == 36) && (row >= 12) && (row <= 17) && (vc[2:0] >= 1) && (vc[2:0] <= 6) && (x[2:0] >= 1) && (x[2:0] <= 6);
 
 function [23:0] map_col(input [2:0] v);
 	case (v)
@@ -217,6 +248,12 @@ always @(*) begin
 	else if (pix) begin
 		case (row)
 			1:  c = 24'h60D0FF;
+			13, 14: if (padt) begin
+					// a pressed button's name lights up
+					if (pbit != 0 && pad_btn[pbit - 1'd1]) c = 24'h48E070;
+					else c = 24'h6A7290;
+				end
+				else c = 24'hE8ECF4;
 			28: case (result)
 					1, 2, 9: c = (result == 2 && job != 2) ? 24'hE8C030 : 24'h48E070;
 					8:       c = 24'hE8C030;
