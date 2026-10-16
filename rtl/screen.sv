@@ -19,6 +19,7 @@ module screen
 	input       [1:0] card_state,
 	input       [1:0] file_state,
 	input             from_tool,
+	input       [1:0] step,         // SS1 Tool's copy: 1 the backup first, 2 the write
 	input       [9:0] cur_sector,
 	input      [10:0] n_done,
 	input      [10:0] n_ok,
@@ -112,7 +113,8 @@ always @(*) begin
 		5:  if (ncol < 9) msg = M_FILE; else begin mcol = 9;
 				msg = (file_state == 1) ? M_F_OK : (file_state == 2) ? M_F_BAD : M_F_NONE; end
 		6:  if (ncol < 9) msg = M_JOB; else begin mcol = 9;
-				msg = (job == 1) ? M_J_BACKUP : (job == 2) ? M_J_VERIFY : (job == 3) ? M_J_WRITE : M_J_NONE; end
+				msg = (step == 1 && job == 1) ? M_J_STEP1 : (step == 2 && job == 3) ? M_J_STEP2 :
+				      (job == 1) ? M_J_BACKUP : (job == 2) ? M_J_VERIFY : (job == 3) ? M_J_WRITE : M_J_NONE; end
 		7:  if (from_tool && job != 0) begin mcol = 9; msg = M_J_TOOL; end
 		9:  case (phase)
 				P_LOAD:   msg = M_P_LOAD;
