@@ -26,7 +26,8 @@ module screen
 	input      [31:0] pad_btn,
 	input      [63:0] pad_ana,      // RX RY LX LY
 	input       [3:0] pad_card,
-	input      [39:0] wdiag,        // wiring check: {pin 6 ID, pin 6 answered, pins low: pin 6, port 2, port 1}
+	input      [39:0] wdiag,
+	input             splash,       // only the title and "starting"        // wiring check: {pin 6 ID, pin 6 answered, pins low: pin 6, port 2, port 1}
 	input       [9:0] cur_sector,
 	input      [10:0] n_done,
 	input      [10:0] n_ok,
@@ -205,6 +206,9 @@ always @(*) begin
 				else blank = 1;
 		endcase
 	end
+	if (splash && nrow != 1 && nrow != 2) begin
+		msg = M_ST_START; mcol = 2; is_num = 0; blank = (nrow != 9);
+	end
 	if (ncol < mcol || nx[9]) blank = 1;
 end
 
@@ -236,17 +240,17 @@ wire       pix = font_q[~x[2:0]];
 wire [4:0] pbit = btn_bit(row == 13 || row == 19, x[8:3] - 6'd2);
 wire [15:0] row_btn = (row >= 17) ? pad_btn[31:16] : pad_btn[15:0];
 
-wire in_map  = !padt && (hc >= 16) && (hc < 16 + 256) && (vc >= 96) && (vc < 96 + 128);
+wire in_map  = !padt && !splash && (hc >= 16) && (hc < 16 + 256) && (vc >= 96) && (vc < 96 + 128);
 wire cell_in = (hc - 10'd16) % 8 != 7 && (vc - 10'd96) % 4 != 3;
 wire [9:0] ny_cur = vc - 10'd96;
 wire [9:0] hx_cur = hc - 10'd16;
 wire [9:0] cellno = {ny_cur[6:2], hx_cur[7:3]};
 
-wire in_bar   = !padt && (vc >= 82) && (vc < 86) && (hc >= 16) && (hc < 16 + 256);
+wire in_bar   = !padt && !splash && (vc >= 82) && (vc < 86) && (hc >= 16) && (hc < 16 + 256);
 wire bar_fill = (hc - 10'd16) < n_done[10:2];
 
 // legend squares at column 36, rows 12-16
-wire in_leg = !padt && (x[9:3] == 36) && (row >= 12) && (row <= 17) && (vc[2:0] >= 1) && (vc[2:0] <= 6) && (x[2:0] >= 1) && (x[2:0] <= 6);
+wire in_leg = !padt && !splash && (x[9:3] == 36) && (row >= 12) && (row <= 17) && (vc[2:0] >= 1) && (vc[2:0] <= 6) && (x[2:0] >= 1) && (x[2:0] <= 6);
 
 function [23:0] map_col(input [2:0] v);
 	case (v)

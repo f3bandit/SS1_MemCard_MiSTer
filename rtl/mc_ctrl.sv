@@ -85,7 +85,8 @@ module mc_ctrl
 	output reg        port2,        // the front port used: 0 port 1, 1 port 2
 	output reg        pin6,         // controller test, wiring check: select on USER_OUT[6] instead
 	input       [6:0] bus_low,      // USER_IN pins something else pulls low
-	output     [39:0] wdiag,        // wiring check: {pin 6 ID, pin 6 answered, pin 6 pins, port 2 pins, port 1 pins}
+	output     [39:0] wdiag,
+	output            splash,       // the screen shows only "starting": just loaded, or a controller test is on its way        // wiring check: {pin 6 ID, pin 6 answered, pin 6 pins, port 2 pins, port 1 pins}
 	// controller test, both front ports: [port 1, then port 2 in the upper half]
 	output reg  [1:0] pad_on,       // a controller answers
 	output reg [15:0] pad_id,
@@ -199,6 +200,12 @@ reg  [1:0] cfg1, cfg2;   // switching that port's controller to analog: the next
 reg  [1:0] tried;        // the switch was sent to that port's controller (until it's unplugged)
 reg  [5:0] swc1, swc2;   // reads until the switch is sent again while that pad stays digital
 reg  [7:0] sw_cnt;       // analog switches sent
+// the first seconds after the core loads: SS1 Tool's files arrive 2-3 s in, so the normal screen
+// would flash up before the job starts
+reg [27:0] boot_cnt = 0;
+wire       booting = !boot_cnt[27];   // about 6.7 s at 20 MHz
+always @(posedge clk) if (booting) boot_cnt <= boot_cnt + 1'd1;
+assign splash = (phase == P_IDLE) && (booting || (req_valid && req_job == J_PAD) || pend_job == J_PAD);
 // wiring check: the pins pulled low during the last read of port 1, port 2 and with pin 6 as
 // the select, and whether a controller answered on pin 6
 reg  [6:0] acc, act1, act2, act6;
