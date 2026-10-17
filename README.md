@@ -2,10 +2,12 @@
 
 Backs up a PlayStation memory card plugged into the SuperStation One's **front port 1** to a
 file, checks a card against a file and, when SS1 Tool asks for it, writes a file back to the card.
-It also has a **controller test** that reads both front ports, which SS1 Tool's controller tester uses.
 
 It's made to be launched by [SS1 Tool](https://github.com/f3bandit/ss1_tool), which creates the
 files, starts the core and reads the result. It also works on its own from MiSTer's menu.
+
+Testing the controllers in the front ports is a separate core:
+[SS1 Controller Tester](https://github.com/f3bandit/SS1_Controller_Tester_MiSTer).
 
 ## Using it on its own
 
@@ -38,22 +40,14 @@ reads each one back: it's marked blue on the map once it matches. SS1 Tool can a
 even when they already match (when you choose to overwrite a save that's already on the card). A sector that won't take the
 write is tried 6 times and then marked red; SS1 Tool still has the backup from just before.
 
-## Controller test (job 4)
-
-Reads whatever is plugged into front ports 1 and 2, in turn, about 60 times a second each, and
-looks for a memory card in each port once a second. A controller that answers as a digital pad
-(ID 41) is sent the DualShock commands for analog mode once (enter config `01 43 00 01 00`,
-analog on `01 44 00 01 02 00 00 00 00`, leave config `01 43 00 00 5A 5A 5A 5A 5A`), so the sticks
-and L3/R3 come through; a pad that can't do analog just stays digital. The TV shows each port's
-controller type, the buttons held (they light up), both sticks and whether there's a memory card;
-the job file gets the same about 12 times a second ("SMCP"). It runs until a new job file is
-mounted or the core is closed.
-
 ## The screen
 
 A 32 x 32 map shows all 1024 sectors of the card as they're read: green read fine, yellow
 needed a retry, red failed, purple differs from the file. Every sector is tried up to 6 times.
 Nothing is written to the file unless every sector was read (or "Save anyway" is on).
+
+For the first few seconds after it loads, the TV shows only the title and STARTING..., so the
+normal screen doesn't flash up before SS1 Tool's job arrives (its files are mounted 2-3 seconds in).
 
 ## How SS1 Tool drives it
 
@@ -63,20 +57,16 @@ and a job file (drive 1). The job file asks for the job and gets the report back
 | Offset | Request (SS1 Tool) | Report (core) |
 |---|---|---|
 | 0 | `SMCQ` | `SMCP` while the job runs (every 0.25 s), `SMCR` when it's finished |
-| 4 | | version (4) |
-| 5 | job: 1 backup, 2 check, 3 write the file to the card, 4 controller test | job |
+| 4 | | version (5; the controller test moved to the SS1 Controller Tester core) |
+| 5 | job: 1 backup, 2 check, 3 write the file to the card | job |
 | 6 | flags: 1 = this backup is step 1 of a copy, 2 = this write is step 2 (shown on the TV) | result: 1 OK, 2 OK with retries, 3 sectors failed, 4 no card, 5 differs, 6 file not 128 KB, 7 file read only, 8 saved with failed sectors, 9 card written |
+| 7 | | card: 0 none, 1 formatted, 2 not formatted |
 | 8 | id (4 bytes) | same id |
 | 12 | | sectors OK, retried, failed, different, total retries, done (16-bit each) |
 | 24 | | slow speed used |
 | 25 | | phase: 2 loading the file, 3 reading the card, 4 saving the file |
 | 26 | | sector being read (16-bit) |
-| 7 | front port: 1 (or 0) port 1, 2 port 2 | card in that port: 0 none, 1 formatted, 2 not formatted |
 | 28 | | sectors written (16-bit) |
-| 32 | | controller test, port 1: port (1), controller there (0/1), its ID, buttons (16-bit, pressed = 1: Select L3 R3 Start Up Right Down Left L2 R2 L1 R1 Triangle Circle Cross Square), RX RY LX LY, a counter, memory card (0 none, 1 formatted, 2 not formatted), analog mode asked for (0/1) |
-| 44 | | controller test: analog switches sent so far |
-| 48 | | controller test, port 2: the same as port 1 at 32 (port is 2) |
-| 64 | | controller test, wiring check: the pins something pulled low (bit n = USER_IN[n]) while reading port 1, port 2 (65), and with USER_OUT[6] as the select (66); a controller answered on USER_OUT[6] (67), its ID (68) |
 | 512 | write: one byte per sector, non-zero = write it even if it already matches | one byte per sector: 1 OK, 2 retried, 3 failed, 4 different, 5 written and checked |
 
 The job file is 1536 bytes.
@@ -84,7 +74,9 @@ The job file is 1536 bytes.
 ## Building
 
 GitHub Actions builds the core with Quartus 17.0.2 Lite on every push (see
-`.github/workflows/build.yml`) after the simulation passes. To simulate locally (Icarus Verilog):
+`.github/workflows/build.yml`) after the simulation passes; every push to main replaces the
+"unstable" test build, and publishing a release attaches the core to it. To simulate locally
+(Icarus Verilog):
 
 ```
 sh sim/run.sh
