@@ -100,6 +100,7 @@ MSGS = [
     ("PD_MC_NO",   "NONE"),
     ("PD_MC_YES",  "YES"),
     ("PD_MC_BLANK","YES, NOT FORMATTED"),
+    ("ST_START",   "STARTING..."),
     ("H_BUSY",     "DON'T REMOVE THE CARD"),
     ("H_IDLE",     "PRESS THE MENU BUTTON FOR OPTIONS OR TO EXIT"),
 ]

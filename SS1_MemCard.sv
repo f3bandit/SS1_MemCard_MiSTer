@@ -165,7 +165,8 @@ wire [15:0] pad_id;
 wire [31:0] pad_btn;
 wire [63:0] pad_ana;
 wire  [3:0] pad_card;
-wire [39:0] wdiag;     // wiring check: port 1 pins, port 2 pins, pin 6 pins, pin 6 answered, pin 6 ID
+wire [39:0] wdiag;
+wire        splash;     // wiring check: port 1 pins, port 2 pins, pin 6 pins, pin 6 answered, pin 6 ID
 wire  [9:0] map_vaddr;
 wire  [2:0] map_vdata;
 
@@ -212,6 +213,7 @@ mc_ctrl mc_ctrl
 	.pin6(pin6),
 	.bus_low(bus_low),
 	.wdiag(wdiag),
+	.splash(splash),
 	.pad_on(pad_on),
 	.pad_id(pad_id),
 	.pad_btn(pad_btn),
@@ -253,6 +255,7 @@ screen screen
 	.pad_ana(pad_ana),
 	.pad_card(pad_card),
 	.wdiag(wdiag),
+	.splash(splash),
 	.cur_sector(cur_sector),
 	.n_done(n_done),
 	.n_ok(n_ok),

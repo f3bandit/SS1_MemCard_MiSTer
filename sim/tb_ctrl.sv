@@ -179,7 +179,7 @@ module tb;
 		.sd_buff_din0(sd_buff_din0), .sd_buff_din1(sd_buff_din1),
 		.phase(phase), .job(job), .result(result), .card_state(card_state), .file_state(file_state),
 		.cur_sector(cur_sector), .n_done(n_done), .n_ok(n_ok), .n_retried(n_retried),
-		.n_failed(n_failed), .n_differ(n_differ), .n_written(), .req_from_tool(), .step(), .port2(port2), .pad_on(), .pad_id(), .pad_btn(), .pad_ana(), .pad_card(), .pin6(pin6), .bus_low(7'd0), .wdiag(),
+		.n_failed(n_failed), .n_differ(n_differ), .n_written(), .req_from_tool(), .step(), .port2(port2), .pad_on(), .pad_id(), .pad_btn(), .pad_ana(), .pad_card(), .pin6(pin6), .bus_low(7'd0), .wdiag(), .splash(),
 		.map_vaddr(10'd0), .map_vdata(),
 		.sio_sel_n(sel_n), .sio_clk(sclk), .sio_cmd(scmd), .sio_dat(dat), .sio_ack(ack_n)
 	);
