@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SS1 Memory Card Tool. Copyright (C) 2026 f3bandit. GPL-3.0-or-later (see LICENSE).
 """Draws the core's 5x7 font (characters 32-95: space, digits, capitals, punctuation) and
 writes rtl/font.sv. The glyphs are drawn here by hand for this core."""
 import os

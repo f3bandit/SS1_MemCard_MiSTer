@@ -1,3 +1,6 @@
+// SS1 Memory Card Tool: test bench
+// Copyright (C) 2026 f3bandit. GPL-3.0-or-later (see LICENSE).
+
 // Testbench for mc_ctrl: a modelled PS1 memory card on the bus and a stand-in for MiSTer's
 // file transfers (hps_io). Run: sh sim/run.sh
 `timescale 1ns/1ns
