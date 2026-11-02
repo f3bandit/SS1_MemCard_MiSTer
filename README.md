@@ -86,4 +86,5 @@ sh sim/run.sh
 
 Copyright (C) 2026 f3bandit: the SS1 Memory Card Tool is f3bandit's idea and design.
 
-GPL-3.0-or-later. `sys/` is MiSTer's standard framework (GPL-2.0-or-later), used by every MiSTer core.
+GPL-3.0-or-later. `sys/` is MiSTer's standard framework (GPL-2.0-or-later), used by every MiSTer core, by
+**Alexey Melnikov (Sorgelig)** and the [MiSTer-devel](https://github.com/MiSTer-devel/Template_MiSTer) contributors.
