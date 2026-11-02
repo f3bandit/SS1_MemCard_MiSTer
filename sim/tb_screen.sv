@@ -1,5 +1,5 @@
 // SS1 Memory Card Tool: test bench
-// Copyright (C) 2026 f3bandit. MIT License (see LICENSE-MIT).
+// Copyright (C) 2026 f3bandit. GPL-3.0-or-later (see LICENSE).
 
 // Renders one frame of the screen to sim/frame_<n>.ppm with made-up status values.
 `timescale 1ns/1ns

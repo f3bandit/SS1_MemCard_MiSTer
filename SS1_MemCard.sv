@@ -11,8 +11,7 @@
 //  of the GNU General Public License as published by the Free Software Foundation, either
 //  version 3 of the License, or (at your option) any later version.
 //
-//  sys/ is MiSTer's framework (GPL-2.0-or-later), shared by every MiSTer core. This file connects the
-//  core to it; the core's own logic in rtl/ is also available under the MIT License (LICENSE-MIT).
+//  sys/ is MiSTer's framework (GPL-2.0-or-later), shared by every MiSTer core.
 //
 //============================================================================
 
