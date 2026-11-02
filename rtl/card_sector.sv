@@ -25,6 +25,7 @@ module card_sector
 	input      [15:0] half_period,
 	input      [15:0] ack_timeout,
 	input      [15:0] sel_delay,    // clk cycles between select and the first bit
+	input      [15:0] byte_gap,     // clk cycles between a byte's ACK and the next byte (a PS1 leaves ~25-50 us)
 
 	input             start,
 	input       [9:0] sector,
@@ -65,9 +66,9 @@ sio_byte sio_byte
 	.sio_clk(sio_clk), .sio_cmd(sio_cmd), .sio_dat(sio_dat), .sio_ack(sio_ack)
 );
 
-localparam S_IDLE = 0, S_SEL = 1, S_BYTE = 2, S_WAIT = 3, S_END = 4, S_PRE = 5, S_PRE2 = 6, S_SEND = 7;
+localparam S_IDLE = 0, S_SEL = 1, S_BYTE = 2, S_WAIT = 3, S_END = 4, S_PRE = 5, S_PRE2 = 6, S_SEND = 7, S_GAP = 8;
 
-reg  [2:0] state;  // 8 states
+reg  [3:0] state;  // 9 states
 reg  [7:0] idx;      // byte of the command, 0..139
 reg [15:0] cnt;
 reg  [7:0] chk;
@@ -107,6 +108,7 @@ always @(posedge clk) begin
 		end
 
 		S_SEL: if (cnt) cnt <= cnt - 1'd1; else state <= S_BYTE;
+		S_GAP: if (cnt) cnt <= cnt - 1'd1; else state <= S_BYTE;
 
 		// the card buffer is read a couple of clocks ahead of the byte that needs it
 		S_BYTE: begin
@@ -182,8 +184,10 @@ always @(posedge clk) begin
 			if (idx == last_idx || !b_ack) state <= S_END;
 			else if ((idx == 2 && b_rx != 8'h5A) || (!wr && idx == 9 && b_rx == 8'hFF && res == R_RANGE)) state <= S_END;
 			else begin
+				// cards that answer in software (sd2psx: PSxMemCard, Retro Remake's) need a moment for the next byte
 				idx   <= idx + 1'd1;
-				state <= S_BYTE;
+				cnt   <= byte_gap;
+				state <= S_GAP;
 			end
 			if (idx != last_idx && !b_ack && idx != 0) res <= R_BAD;
 		end

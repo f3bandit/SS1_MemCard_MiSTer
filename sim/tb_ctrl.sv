@@ -140,7 +140,7 @@ module tb;
 
 	wire sel_n, sclk, scmd, dat, ack_n;
 
-	mc_ctrl #(.HALF_FAST(3), .HALF_SLOW(6), .ACK_TO(60), .SEL_DLY(4), .GAP(10), .RETRY_WAIT(20), .POLL(2000), .PROGRESS(50000)) dut
+	mc_ctrl #(.HALF_FAST(3), .HALF_SLOW(6), .ACK_TO(60), .SEL_DLY(4), .BYTE_GAP(4), .GAP(10), .RETRY_WAIT(20), .POLL(2000), .PROGRESS(50000)) dut
 	(
 		.clk(clk), .reset(reset),
 		.cmd_backup(cmd_backup), .cmd_verify(cmd_verify),

@@ -34,6 +34,7 @@ module mc_ctrl
 	parameter HALF_SLOW  = 79,       // 125 kHz bus
 	parameter ACK_TO     = 4000,     // 200 us
 	parameter SEL_DLY    = 400,      // 20 us
+	parameter BYTE_GAP   = 600,      // 30 us between bytes, as a PS1 leaves (60 us on the slow bus)
 	parameter GAP        = 2000,     // 100 us between commands
 	parameter RETRY_WAIT = 20000,    // 1 ms before a retry (10 ms on the slow bus)
 	parameter POLL       = 6000000,  // look for a card every 0.3 s
@@ -162,6 +163,7 @@ card_sector card_sector
 	.half_period(opt_slow ? 16'(HALF_SLOW) : 16'(HALF_FAST)),
 	.ack_timeout(16'(ACK_TO)),
 	.sel_delay(16'(SEL_DLY)),
+	.byte_gap(opt_slow ? 16'(BYTE_GAP * 2) : 16'(BYTE_GAP)),
 	.start(cs_start), .sector(cs_sector), .mode(cs_mode),
 	.busy(), .done(cs_done), .result(cs_result), .mismatch(cs_mismatch),
 	.hdr0(cs_hdr0), .hdr1(cs_hdr1),
