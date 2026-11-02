@@ -1,9 +1,6 @@
 // SS1 Memory Card Tool
 // Copyright (C) 2026 f3bandit
-//
-// This program is free software: you can redistribute it and/or modify it under the terms of
-// the GNU General Public License as published by the Free Software Foundation, either version 3
-// of the License, or (at your option) any later version.
+// MIT License (see LICENSE-MIT).
 //
 // screen: what the TV shows. 240p, 15 kHz (MiSTer scales it for HDMI): a 64x30 grid of
 // 8x8 characters, a progress bar and a 32x32 map of the card's 1024 sectors.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# SS1 Memory Card Tool. Copyright (C) 2026 f3bandit. GPL-3.0-or-later (see LICENSE).
+# SS1 Memory Card Tool. Copyright (C) 2026 f3bandit. MIT License (see LICENSE-MIT).
 """Writes the screen texts: rtl/messages.hex (48 characters per message) and rtl/messages.vh
 (their numbers). The core's font has capitals, digits and punctuation only."""
 import os
